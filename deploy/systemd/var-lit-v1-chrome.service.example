@@ -1,0 +1,22 @@
+[Unit]
+Description=Var-Lit V1 dedicated Chrome
+Requires=var-lit-v1-display.service
+After=network-online.target var-lit-v1-display.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=varlit
+Group=varlit
+Environment=DISPLAY=:99
+Environment=VARIATIONAL_CHROME_PROFILE_DIR=/var/lib/var-lit-v1/chrome-profile
+Environment=VARIATIONAL_CHROME_DEBUG_PORT=9222
+ExecStart=/opt/var-lit-v1/deploy/launch_chrome.sh
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+KillMode=mixed
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

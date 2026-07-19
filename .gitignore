@@ -1,0 +1,57 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.zip
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test and coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE/editor files
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+
+# Local runtime artifacts
+logs/
+log/
+.env
+.env.local
+.env.*.local
+runtime/
+chrome-profile/
+*.jsonl
+*.sqlite3
+*.sqlite3-*
+*.pem
+*.key
+
+# Local research database and synchronizer state. Documentation and schema code
+# stay in Git; live/replay data never does.
+research_data/*.log
+research_data/*.pid
+research_data/historical/
+research_data/models/
+research_data/snapshots/
+research_data/catalog.json
+research_data/LATEST
+
+# all excel files
+*.xlsx
+
+# all csv files
+*.csv

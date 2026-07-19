@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Var-Lit V1 Bridge",
+  "version": "1.0.0",
+  "minimum_chrome_version": "116",
+  "description": "Var-Lit V1 local bridge for Variational market data and approved order replay.",
+  "permissions": ["debugger", "tabs", "storage"],
+  "host_permissions": ["https://omni.variational.io/*"],
+  "action": {
+    "default_title": "Var-Lit V1 Bridge",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:*"
+  }
+}

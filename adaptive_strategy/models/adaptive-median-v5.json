@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "modelVersion": "adaptive-median-v5",
+  "calibrationDataset": "log/archive/adaptive-median-v1-calibration-20260714T1926+0800.jsonl",
+  "calibrationDatasetSha256": "2796c9bab70988af717a2edeee97995ede5b4063186f722b15bc3979ec2e636d",
+  "asset": "BTC",
+  "referenceNotionalUsd": "500",
+  "coverageHours": "4.1041388889",
+  "formula": {
+    "deadbandMad1h": "0.25",
+    "maxStepMad1h": "0.50",
+    "weight5m": "0.25",
+    "weight30m": "0.45",
+    "weight1h": "0.30",
+    "exitQuantile": 95,
+    "entryMedianMarginBps": "0.05",
+    "entryMadMultiplier30m": "0.20",
+    "opportunityMergeSeconds": 15,
+    "balanceRatioLimit": "2",
+    "balanceMinimumEvents": 8,
+    "epsilon": "0.000000000000000001"
+  },
+  "calibration": {
+    "BUY": {
+      "5": {
+        "median": "0.0009496063595112306046111813355",
+        "q80": "0.0009785269377464095969835803571",
+        "q95": "0.001012730607392683500114742193",
+        "mad": "0.0000196516551768597786667857426",
+        "sampleCount": 86,
+        "spanMs": 299601,
+        "densityPerSecond": "0.2870484410933207833084669277",
+        "maxGapMs": 9009
+      },
+      "30": {
+        "median": "0.0009595245909458661",
+        "q80": "0.0009878053776335167",
+        "q95": "0.001010067067958374680208232554",
+        "mad": "0.00002296164714797513",
+        "sampleCount": 494,
+        "spanMs": 1797000,
+        "densityPerSecond": "0.2749026154702282",
+        "maxGapMs": 18037
+      },
+      "60": {
+        "median": "0.0009173948588727624",
+        "q80": "0.0009700798783849219",
+        "q95": "0.001002490024976861010767231265",
+        "mad": "0.00004883013929063270",
+        "sampleCount": 981,
+        "spanMs": 3597000,
+        "densityPerSecond": "0.2727272727272727",
+        "maxGapMs": 18037
+      }
+    },
+    "SELL": {
+      "5": {
+        "median": "-0.001074438664134443907594167001",
+        "q80": "-0.001047665679374761540864143224",
+        "q95": "-0.001025639063376139773893858713",
+        "mad": "0.000022303834352946786080910491",
+        "sampleCount": 86,
+        "spanMs": 299601,
+        "densityPerSecond": "0.2870484410933207833084669277",
+        "maxGapMs": 9009
+      },
+      "30": {
+        "median": "-0.0010784934440661757",
+        "q80": "-0.0010459278875684114",
+        "q95": "-0.001015786361064311634697550489",
+        "mad": "0.00002291685243742915",
+        "sampleCount": 494,
+        "spanMs": 1797000,
+        "densityPerSecond": "0.2749026154702282",
+        "maxGapMs": 18037
+      },
+      "60": {
+        "median": "-0.0010326895023508197",
+        "q80": "-0.0009729981035649845",
+        "q95": "-0.0009269216147970395962145593723",
+        "mad": "0.00004874192741579575",
+        "sampleCount": 981,
+        "spanMs": 3597000,
+        "densityPerSecond": "0.2727272727272727",
+        "maxGapMs": 18037
+      }
+    }
+  }
+}

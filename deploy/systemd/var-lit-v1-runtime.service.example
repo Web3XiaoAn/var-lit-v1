@@ -1,0 +1,21 @@
+[Unit]
+Description=Var-Lit V1 trading runtime
+Requires=var-lit-v1-chrome.service
+After=network-online.target var-lit-v1-chrome.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=varlit
+Group=varlit
+WorkingDirectory=/opt/var-lit-v1
+ExecStartPre=/usr/bin/test -f /opt/var-lit-v1/.env
+ExecStart=/opt/var-lit-v1/deploy/run_runtime.sh
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=40
+KillSignal=SIGTERM
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
