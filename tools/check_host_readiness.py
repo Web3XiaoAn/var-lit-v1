@@ -25,6 +25,7 @@ REQUIRED_PROJECT_FILES = (
     "chrome_extension/background.js",
     "deploy/launch_chrome.sh",
     "deploy/run_runtime.sh",
+    "deploy/systemd/var-lit-v1-window-manager.service.example",
 )
 SECRET_KEYS = {
     "LIGHTER_PRIVATE_KEY",
@@ -238,6 +239,14 @@ def build_report(
     if phase == "server":
         xvfb = shutil.which("Xvfb")
         checks.append(check("xvfb", xvfb is not None, xvfb or "Xvfb not found"))
+        openbox = shutil.which("openbox")
+        checks.append(
+            check(
+                "openbox",
+                openbox is not None,
+                openbox or "Openbox window manager not found",
+            )
+        )
 
     env_values, env_errors = parse_dotenv(config_path)
     config_exists = config_path.is_file()

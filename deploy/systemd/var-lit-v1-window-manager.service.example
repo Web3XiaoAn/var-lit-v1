@@ -1,0 +1,16 @@
+[Unit]
+Description=Var-Lit V1 lightweight window manager
+Requires=var-lit-v1-display.service
+After=var-lit-v1-display.service
+
+[Service]
+Type=simple
+User=varlit
+Group=varlit
+Environment=DISPLAY=:99
+ExecStart=/usr/bin/openbox --replace
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

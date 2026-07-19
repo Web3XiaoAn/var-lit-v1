@@ -19,7 +19,7 @@ Var-Lit V1 是 Variational 与 Lighter 之间的 BTC 双边执行程序。这是
 - 仓位、活动委托与未决意图对账；异常恢复和手动 Variational 成交自动对冲。
 - `observe` 只观察模式与 `live` 连续实盘模式。
 - 本地 Chrome 扩展、三通道健康探针、执行延迟分析和资源采样工具。
-- Ubuntu 24.04、普通 Chrome + Xvfb、systemd 的服务器部署模板。
+- Ubuntu 24.04、普通 Chrome + Xvfb + 轻量 Openbox、systemd 的服务器部署模板。
 - 可选 SQLite 研究库；服务器默认关闭，只保留约一小时的滚动运行数据。
 
 内部策略状态标识仍为 `adaptive-median-v5`。它是已有实盘状态和模型文件的兼容标识，
@@ -32,7 +32,7 @@ Var-Lit V1 是 Variational 与 Lighter 之间的 BTC 双边执行程序。这是
 - `adaptive_strategy/`：纯策略计算、模型与不可变决策对象。
 - `variational/`：浏览器本地通道、Lighter 下单、遥测与研究库接口。
 - `chrome_extension/`：Var-Lit V1 Chrome Bridge。
-- `deploy/`：Ubuntu、Xvfb、Chrome 与 systemd 部署文件。
+- `deploy/`：Ubuntu、Xvfb、Openbox、Chrome 与 systemd 部署文件。
 - `tools/`：只读探针、性能分析、资源采样和研究数据工具。
 - `tests/`：Python 与扩展自动测试。
 - `docs/`、`research_data/README.md`：策略与研究数据说明。

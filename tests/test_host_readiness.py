@@ -34,6 +34,7 @@ class HostReadinessTests(unittest.TestCase):
                 "chrome_extension/background.js",
                 "deploy/launch_chrome.sh",
                 "deploy/run_runtime.sh",
+                "deploy/systemd/var-lit-v1-window-manager.service.example",
             ):
                 target = project / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -73,10 +74,11 @@ class HostReadinessTests(unittest.TestCase):
                     disk_free_bytes=20 * GIB,
                 )
 
-        # The synthetic host has no real Linux Chrome/Xvfb binaries, so those
-        # two checks fail while the resource/config checks remain valid.
+        # The synthetic host has no real Linux Chrome/Xvfb/Openbox binaries,
+        # so those checks fail while the resource/config checks remain valid.
         self.assertIn("chrome", result["failed"])
         self.assertIn("xvfb", result["failed"])
+        self.assertIn("openbox", result["failed"])
         for name in (
             "server_architecture",
             "memory",

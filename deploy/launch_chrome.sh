@@ -54,7 +54,7 @@ chrome_args=(
   --disable-background-timer-throttling \
   --disable-renderer-backgrounding \
   --disable-backgrounding-occluded-windows \
-  --window-size=1280,900
+  --window-size=1920,1080
 )
 
 chrome_name="$(basename "${chrome_bin}")"

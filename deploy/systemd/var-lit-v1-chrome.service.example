@@ -1,7 +1,7 @@
 [Unit]
 Description=Var-Lit V1 dedicated Chrome
-Requires=var-lit-v1-display.service
-After=network-online.target var-lit-v1-display.service
+Requires=var-lit-v1-display.service var-lit-v1-window-manager.service
+After=network-online.target var-lit-v1-display.service var-lit-v1-window-manager.service
 Wants=network-online.target
 
 [Service]

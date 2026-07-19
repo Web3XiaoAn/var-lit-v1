@@ -57,6 +57,7 @@ class DeploymentAssetTests(unittest.TestCase):
             "--disable-renderer-backgrounding",
             "--disable-backgrounding-occluded-windows",
             "--remote-debugging-address=127.0.0.1",
+            "--window-size=1920,1080",
         ):
             self.assertIn(required, source)
         for forbidden in (
@@ -140,6 +141,18 @@ class DeploymentAssetTests(unittest.TestCase):
         self.assertNotIn("--no-hedge", source)
 
     def test_runtime_restarts_after_chrome_without_restarting_chrome(self) -> None:
+        display = (
+            PROJECT_DIR
+            / "deploy"
+            / "systemd"
+            / "var-lit-v1-display.service.example"
+        ).read_text(encoding="utf-8")
+        window_manager = (
+            PROJECT_DIR
+            / "deploy"
+            / "systemd"
+            / "var-lit-v1-window-manager.service.example"
+        ).read_text(encoding="utf-8")
         chrome = (
             PROJECT_DIR
             / "deploy"
@@ -153,7 +166,14 @@ class DeploymentAssetTests(unittest.TestCase):
             / "var-lit-v1-runtime.service.example"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("Requires=var-lit-v1-display.service", chrome)
+        self.assertIn("1920x1080x24", display)
+        self.assertIn("User=varlit", window_manager)
+        self.assertIn("ExecStart=/usr/bin/openbox --replace", window_manager)
+        self.assertIn("Requires=var-lit-v1-display.service", window_manager)
+        self.assertIn(
+            "Requires=var-lit-v1-display.service var-lit-v1-window-manager.service",
+            chrome,
+        )
         self.assertIn("Requires=var-lit-v1-chrome.service", runtime)
         self.assertNotIn("PartOf=var-lit-v1-runtime.service", chrome)
 

@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 User=varlit
 Group=varlit
-ExecStart=/usr/bin/Xvfb :99 -screen 0 1280x900x24 -nolisten tcp -noreset
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -noreset
 Restart=always
 RestartSec=2
 
