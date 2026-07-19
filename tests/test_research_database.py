@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from variational.research_database import (
     ResearchDatabase,
@@ -151,7 +152,11 @@ class ResearchDatabaseTests(unittest.TestCase):
                 for index in range(40)
             ]
 
-            database.insert_events([pinned, *live])
+            with patch(
+                "variational.research_database.time.monotonic",
+                return_value=1.0,
+            ):
+                database.insert_events([pinned, *live])
 
             stats = database.stats()
             self.assertEqual(stats["pinned_events"], 1)

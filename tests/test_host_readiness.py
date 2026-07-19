@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tools.check_host_readiness import GIB, build_report, parse_dotenv
 
@@ -49,18 +50,28 @@ class HostReadinessTests(unittest.TestCase):
             )
             config.chmod(0o600)
 
-            result = build_report(
-                phase="server",
-                project_dir=project,
-                config_path=config,
-                chrome_profile=None,
-                system="Linux",
-                machine="x86_64",
-                cpu_count=2,
-                memory_bytes=4 * GIB,
-                swap_bytes=2 * GIB,
-                disk_free_bytes=20 * GIB,
-            )
+            with (
+                patch(
+                    "tools.check_host_readiness._find_chrome",
+                    return_value=None,
+                ),
+                patch(
+                    "tools.check_host_readiness.shutil.which",
+                    return_value=None,
+                ),
+            ):
+                result = build_report(
+                    phase="server",
+                    project_dir=project,
+                    config_path=config,
+                    chrome_profile=None,
+                    system="Linux",
+                    machine="x86_64",
+                    cpu_count=2,
+                    memory_bytes=4 * GIB,
+                    swap_bytes=2 * GIB,
+                    disk_free_bytes=20 * GIB,
+                )
 
         # The synthetic host has no real Linux Chrome/Xvfb binaries, so those
         # two checks fail while the resource/config checks remain valid.

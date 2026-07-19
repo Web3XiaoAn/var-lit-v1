@@ -183,7 +183,7 @@ class ResearchDatabase:
             raise ValueError("max_bytes must be positive")
         self.path = path.expanduser().resolve()
         self.max_bytes = max_bytes
-        self._last_retention_check = 0.0
+        self._last_retention_check: float | None = None
 
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -1119,7 +1119,11 @@ class ResearchDatabase:
 
     def _enforce_retention_if_due(self, connection: sqlite3.Connection) -> None:
         now = time.monotonic()
-        if now - self._last_retention_check < RETENTION_CHECK_INTERVAL_SECONDS:
+        if (
+            self._last_retention_check is not None
+            and now - self._last_retention_check
+            < RETENTION_CHECK_INTERVAL_SECONDS
+        ):
             return
         self._last_retention_check = now
         if self.byte_size() <= self.max_bytes:
