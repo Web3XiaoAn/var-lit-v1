@@ -171,6 +171,41 @@ class DashboardCalculationTests(unittest.TestCase):
         self.assertTrue(var_result_is_ambiguous({"ok": False, "error": "The operation was aborted"}))
         self.assertFalse(var_result_is_ambiguous({"ok": False, "error": "Var fetch HTTP 422"}))
 
+    def test_favorable_persisted_execution_improvement_restores_signed(self) -> None:
+        record = OrderLifecycle.from_payload(
+            {
+                "trade_key": "favorable-fill",
+                "trade_id": "favorable-fill",
+                "side": "sell",
+                "qty": "0.00778",
+                "asset": "BTC",
+                "execution_loss_usd": "-0.0028008",
+                "execution_loss_recorded": True,
+            }
+        )
+
+        self.assertIsNotNone(record)
+        self.assertEqual(record.execution_loss_usd, Decimal("-0.0028008"))
+
+    def test_favorable_fill_records_signed_execution_improvement(self) -> None:
+        runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
+        record = make_record(
+            "favorable-live-fill",
+            "sell",
+            "0.00778",
+            "65230.2",
+            "65266.2",
+        )
+        record.var_fill_source = "event"
+        record.firm_guard_pnl = Decimal("-0.2828808")
+        record.strategy_phase = "open"
+        record.hedge_status = "filled"
+
+        runtime._capture_execution_loss_locked(record)
+
+        self.assertTrue(record.execution_loss_recorded)
+        self.assertEqual(record.execution_loss_usd, Decimal("-0.0028008"))
+
     def test_status_uses_firm_guard_estimate_instead_of_preliminary_signal(self) -> None:
         extractor = getattr(main_module, "firm_guard_pnl_from_result", None)
         self.assertIsNotNone(extractor)

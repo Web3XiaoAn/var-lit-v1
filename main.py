@@ -1623,7 +1623,6 @@ class OrderLifecycle:
             )
             execution_loss_usd = optional_decimal(
                 "execution_loss_usd",
-                nonnegative=True,
             )
             open_notional_usd = optional_decimal(
                 "open_notional_usd",
