@@ -8,7 +8,7 @@ import time
 import unittest
 from argparse import Namespace
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
@@ -107,6 +107,39 @@ class AdaptiveRuntimeTests(unittest.TestCase):
 
         asyncio.run(run_case())
 
+    def test_signal_margin_rejects_edge_below_quarter_bps(self) -> None:
+        async def run_case() -> None:
+            runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
+            candidate = make_open_candidate(runtime)
+            rate = candidate.threshold + Decimal("0.00002")
+            candidate = replace(
+                candidate,
+                reference_rate=rate,
+                actual_rate=rate,
+                actual_open_pnl_usd=rate * candidate.order_notional_usd,
+            )
+            runtime.strategy_config.execution_mode = "live"
+            with patch.object(
+                runtime,
+                "evaluate_adaptive_open",
+                return_value=main_module.StrategyDecision(
+                    main_module.StrategyAction.OPEN,
+                    "candidate",
+                    open_candidate=candidate,
+                ),
+            ), patch.object(
+                runtime,
+                "recent_directional_rate_range",
+                return_value=Decimal("0"),
+            ):
+                signal = await runtime._auto_var_signal_for_current_open(None)
+
+            self.assertIsNone(signal)
+            self.assertIsNone(runtime._selected_open_candidate)
+            self.assertIn("0.25bps", runtime.last_auto_var_order_status)
+
+        asyncio.run(run_case())
+
     def test_real_open_evaluation_does_not_add_a_second_signal_margin(self) -> None:
         async def run_case() -> None:
             runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
@@ -174,7 +207,7 @@ class AdaptiveRuntimeTests(unittest.TestCase):
             )
         )
 
-    def test_zero_wear_close_stability_accepts_continuous_or_recent_sum(self) -> None:
+    def test_zero_wear_close_stability_requires_current_continuous_interval(self) -> None:
         runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
 
         passed, continuous, accumulated = runtime._update_close_zero_wear_stability(
@@ -232,9 +265,75 @@ class AdaptiveRuntimeTests(unittest.TestCase):
                 above_zero_wear=above,
                 now_ms=now_ms,
             )
-        self.assertTrue(passed)
+        self.assertFalse(passed)
         self.assertEqual(continuous, 1_000)
         self.assertEqual(accumulated, 2_000)
+
+    def test_early_close_cannot_bypass_zero_wear_stability(self) -> None:
+        async def run_case() -> None:
+            runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
+            frozen = make_open_candidate(runtime)
+            open_record = make_record("stable-gate-open", "buy", "2", "100", "100.2")
+            open_record.strategy_tag = main_module.ADAPTIVE_MODEL_VERSION
+            open_record.strategy_phase = "open"
+            open_record.adaptive_strategy_context = open_candidate_to_payload(frozen)
+            open_record.var_fill_ts_iso = (
+                datetime.now(timezone.utc) - timedelta(seconds=120)
+            ).isoformat()
+            open_record.open_notional_usd = Decimal("200")
+            open_record.hedge_status = "filled"
+            open_record.lighter_filled_qty = Decimal("2")
+            runtime.base_amount_multiplier = 1_000_000
+            assert runtime.last_market_frame is not None
+
+            close_candidate = main_module.CloseCandidate(
+                close_direction=main_module.StrategySide.SELL,
+                frame_captured_at_ms=time.time_ns() // 1_000_000,
+                frozen_epoch_id=frozen.epoch.epoch_id,
+                held_seconds=120,
+                actual_close_rate=Decimal("-0.0005"),
+                regression_target_rate=Decimal("-1"),
+                expected_close_pnl_usd=Decimal("-0.1"),
+                close_reserve_usd=Decimal("0.01"),
+                round_lower_bound_usd=Decimal("0.29"),
+                required_floor_usd=Decimal("0"),
+                regression_passed=True,
+                max_hold_alert=False,
+            )
+
+            async def current_frame(**_kwargs):
+                return runtime.last_market_frame, {}
+
+            runtime.current_adaptive_market_frame = current_frame
+            with patch.object(
+                runtime,
+                "automation_can_submit_var_order",
+                return_value=True,
+            ), patch.object(
+                runtime.strategy_engine,
+                "evaluate_close",
+                return_value=main_module.StrategyDecision(
+                    main_module.StrategyAction.CLOSE,
+                    "close_floor_passed",
+                    close_candidate=close_candidate,
+                ),
+            ):
+                signal = await runtime._auto_var_close_signal_for_current_open(
+                    open_record
+                )
+
+            self.assertIsNone(signal)
+            self.assertEqual(
+                runtime.last_strategy_decision.reason,
+                "close_zero_wear_stability_pending",
+            )
+            assert runtime.last_strategy_decision.close_candidate is not None
+            self.assertFalse(
+                runtime.last_strategy_decision.close_candidate
+                .zero_wear_stability_passed
+            )
+
+        asyncio.run(run_case())
 
     def test_live_requires_fresh_flat_account_and_continues_without_token(self) -> None:
         runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
@@ -597,6 +696,50 @@ class AdaptiveRuntimeTests(unittest.TestCase):
 
         asyncio.run(run_case())
 
+    def test_two_consecutive_wear_breaches_pause_new_opening(self) -> None:
+        async def run_case() -> None:
+            runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
+            runtime.strategy_config.execution_mode = "live"
+
+            for index in range(2):
+                open_record = make_record(
+                    f"breaker-open-{index}",
+                    "buy",
+                    "2",
+                    "100",
+                    "99",
+                )
+                close_record = make_record(
+                    f"breaker-close-{index}",
+                    "sell",
+                    "2",
+                    "100",
+                    "101",
+                )
+                open_record.strategy_tag = main_module.ADAPTIVE_MODEL_VERSION
+                open_record.strategy_phase = "open"
+                close_record.strategy_phase = "close"
+                open_record.hedge_status = close_record.hedge_status = "filled"
+                open_record.lighter_filled_qty = Decimal("2")
+                close_record.lighter_filled_qty = Decimal("2")
+                runtime.records[open_record.trade_key] = open_record
+                runtime.records[close_record.trade_key] = close_record
+                runtime.record_order.extend(
+                    [open_record.trade_key, close_record.trade_key]
+                )
+                self.assertTrue(
+                    await runtime.record_completed_canary_round(close_record)
+                )
+
+            self.assertTrue(runtime.automation_paused)
+            self.assertEqual(runtime._consecutive_round_wear_breaches, 2)
+            self.assertIn(
+                "consecutive rounds breached",
+                runtime.automation_pause_reason,
+            )
+
+        asyncio.run(run_case())
+
     def test_firm_reference_depth_must_still_cover_opening_gate(self) -> None:
         async def run_case() -> None:
             class Broker:
@@ -807,6 +950,7 @@ class AdaptiveRuntimeTests(unittest.TestCase):
                     "round_count": 3,
                     "cumulative_loss_usd": "1.25",
                     "consecutive_losses": 2,
+                    "consecutive_wear_breaches": 2,
                     "state": "HALTED",
                 }
             )
@@ -821,6 +965,7 @@ class AdaptiveRuntimeTests(unittest.TestCase):
             self.assertEqual(runtime._canary_round_count, 3)
             self.assertEqual(runtime._canary_cumulative_loss_usd, Decimal("1.25"))
             self.assertEqual(runtime._canary_consecutive_losses, 2)
+            self.assertEqual(runtime._consecutive_round_wear_breaches, 2)
 
         asyncio.run(run_case())
 

@@ -169,6 +169,9 @@ V5_OPEN_RATE_RANGE_BPS = Decimal("3.0")
 V5_CLOSE_RATE_RANGE_BPS = Decimal("4.0")
 V5_RATE_RANGE_WINDOW_MS = 5_000
 V5_CLOSE_RANGE_MAX_DEFERRAL_MS = 2_000
+OPEN_SIGNAL_EXECUTION_HEADROOM_BPS = Decimal("0.25")
+MAX_CONSECUTIVE_ROUND_WEAR_BREACHES = 2
+GUARDED_CLOSE_RETRY_DELAY_SECONDS = 0.25
 LIGHTER_WS_URL = "wss://mainnet.zklighter.elliot.ai/stream"
 LIGHTER_WS_PING_INTERVAL_SECONDS = 30
 LIGHTER_WS_PING_TIMEOUT_SECONDS = 30
@@ -641,13 +644,13 @@ def lighter_reduce_only_market_price_tick(
     anchor_price_i: int,
     lighter_side: str,
 ) -> int | None:
-    """Return a practically unbounded market price for a committed close.
+    """Return a practically unbounded price for emergency/recovery reduction.
 
     Lighter's market-order transaction still requires a positive integer price.
-    After the Variational close has filled, that field must no longer act as a
-    local economic/slippage veto: leaving the Lighter leg open is the larger
-    risk.  A BUY may sweep up to twice the anchor; a SELL uses the minimum
-    positive tick.  The exchange's own reduce-only semantics remain authoritative.
+    Emergency and recovery records prioritize removing one-sided exposure over
+    the normal strategy's economic limit. A BUY may sweep up to twice the
+    anchor; a SELL uses the minimum positive tick. The exchange's own
+    reduce-only semantics remain authoritative.
     """
 
     if anchor_price_i <= 0:
@@ -2275,6 +2278,7 @@ class VariationalToLighterRuntime:
         self._canary_round_count = 0
         self._canary_cumulative_loss_usd = Decimal("0")
         self._canary_consecutive_losses = 0
+        self._consecutive_round_wear_breaches = 0
         self._canary_completed_close_keys: set[str] = set()
         self._round_cooldown_close_keys: set[str] = set()
         self._canary_session_state = CANARY_SESSION_OBSERVING
@@ -2407,6 +2411,9 @@ class VariationalToLighterRuntime:
                             self._canary_cumulative_loss_usd
                         ),
                         "consecutive_losses": self._canary_consecutive_losses,
+                        "consecutive_wear_breaches": (
+                            self._consecutive_round_wear_breaches
+                        ),
                         "state": self._canary_session_state,
                     },
                     "automation_paused": self.automation_paused,
@@ -3397,6 +3404,10 @@ class VariationalToLighterRuntime:
         if isinstance(raw_canary, dict):
             raw_round_count = raw_canary.get("round_count")
             raw_consecutive_losses = raw_canary.get("consecutive_losses")
+            raw_consecutive_wear_breaches = raw_canary.get(
+                "consecutive_wear_breaches",
+                0,
+            )
             if (
                 isinstance(raw_round_count, bool)
                 or not isinstance(raw_round_count, int)
@@ -3406,6 +3417,10 @@ class VariationalToLighterRuntime:
                 or not isinstance(raw_consecutive_losses, int)
                 or raw_consecutive_losses < 0
                 or raw_consecutive_losses > 10_000
+                or isinstance(raw_consecutive_wear_breaches, bool)
+                or not isinstance(raw_consecutive_wear_breaches, int)
+                or raw_consecutive_wear_breaches < 0
+                or raw_consecutive_wear_breaches > 10_000
             ):
                 raise RuntimeError("Runtime state canary counters are invalid")
             self._canary_round_count = raw_round_count
@@ -3414,6 +3429,9 @@ class VariationalToLighterRuntime:
                 raise RuntimeError("Runtime state canary loss counter is invalid")
             self._canary_cumulative_loss_usd = cumulative_loss
             self._canary_consecutive_losses = raw_consecutive_losses
+            self._consecutive_round_wear_breaches = (
+                raw_consecutive_wear_breaches
+            )
             saved_state = raw_canary.get("state")
             if saved_state not in {
                 CANARY_SESSION_OBSERVING,
@@ -5518,6 +5536,39 @@ class VariationalToLighterRuntime:
                 self._canary_consecutive_losses += 1
             elif round_pnl is not None:
                 self._canary_consecutive_losses = 0
+            open_notional = var_open_notional_usd(
+                settled_round.open_record
+            )
+            frozen_open = open_candidate_from_payload(
+                settled_round.open_record.adaptive_strategy_context
+            )
+            wear_bps = (
+                frozen_open.epoch.max_normal_round_wear_bps
+                if frozen_open is not None
+                else self.strategy_config.max_normal_round_wear_bps
+            )
+            wear_floor = (
+                -open_notional * wear_bps / Decimal("10000")
+                if open_notional is not None
+                else None
+            )
+            if (
+                round_pnl is not None
+                and wear_floor is not None
+                and round_pnl < wear_floor
+            ):
+                self._consecutive_round_wear_breaches += 1
+            elif round_pnl is not None and wear_floor is not None:
+                self._consecutive_round_wear_breaches = 0
+            if (
+                self._consecutive_round_wear_breaches
+                >= MAX_CONSECUTIVE_ROUND_WEAR_BREACHES
+            ):
+                self.pause_automation(
+                    "Safety circuit breaker: "
+                    f"{self._consecutive_round_wear_breaches} consecutive "
+                    "rounds breached the configured wear floor"
+                )
             self._canary_session_state = (
                 CANARY_SESSION_HALTED
                 if self.automation_paused
@@ -5528,6 +5579,10 @@ class VariationalToLighterRuntime:
                 "round_pnl": round_pnl,
                 "cumulative_loss_usd": self._canary_cumulative_loss_usd,
                 "consecutive_losses": self._canary_consecutive_losses,
+                "wear_floor_usd": wear_floor,
+                "consecutive_wear_breaches": (
+                    self._consecutive_round_wear_breaches
+                ),
                 "state_after": self._canary_session_state,
             }
         self.last_auto_var_order_status = (
@@ -7546,6 +7601,34 @@ class VariationalToLighterRuntime:
                 error = None
             else:
                 if revalidation_error is not None:
+                    guarded_close_retry = bool(
+                        record.lighter_reduce_only
+                        and record.strategy_phase == "close"
+                        and record.strategy_tag == ADAPTIVE_MODEL_VERSION
+                        and len(record.lighter_client_order_ids)
+                        < self.strategy_config.lighter_hedge_max_attempts
+                    )
+                    if guarded_close_retry:
+                        async with self._record_lock:
+                            record.hedge_status = "retrying"
+                            record.hedge_error = revalidation_error
+                            payload = record.to_payload()
+                        self.lighter_requeue_after_task_keys.add(record.trade_key)
+                        self.trace_event(
+                            "lighter_guarded_close_retry",
+                            trace_id,
+                            trade_key=record.trade_key,
+                            error=revalidation_error,
+                            attempt=len(record.lighter_client_order_ids),
+                        )
+                        await self.append_order_log(
+                            "lighter_guarded_close_retry",
+                            payload,
+                        )
+                        await asyncio.sleep(
+                            GUARDED_CLOSE_RETRY_DELAY_SECONDS
+                        )
+                        return
                     await self.fail_lighter_hedge(record, revalidation_error)
                     return
                 assert dispatch_snapshot is not None
@@ -7969,12 +8052,9 @@ class VariationalToLighterRuntime:
     ) -> tuple[LighterHedgeDispatchSnapshot | None, str | None]:
         """Capture the only post-Commit pre-send snapshot with integer prices.
 
-        Firm Guard is the pre-Commit admission decision.  Once Variational has
-        committed, refusing the Lighter hedge cannot preserve that theoretical
-        PnL; it only creates one-sided exposure.  New-opening hedges retain the
-        fresh-depth and configured IOC checks.  A reduce-only close bypasses
-        those local economic/slippage vetoes and uses a practically unbounded
-        market price because restoring a flat account is mandatory.
+        Normal strategy legs retain fresh-depth, IOC-slippage and frozen Firm
+        economics.  Only emergency/recovery reduce-only records may bypass
+        those vetoes to restore a flat account.
         """
         trace_id = record.trace_id
         async with self.lighter_order_book_lock:
@@ -8053,8 +8133,15 @@ class VariationalToLighterRuntime:
                 client_order_id=record.lighter_client_order_id,
             )
             return None, "Market changed before Lighter hedge submission"
-        is_reduce_only_recovery = record.lighter_reduce_only
-        if is_reduce_only_recovery:
+        is_guarded_strategy_close = bool(
+            record.lighter_reduce_only
+            and record.strategy_phase == "close"
+            and record.strategy_tag == ADAPTIVE_MODEL_VERSION
+        )
+        is_mandatory_recovery = (
+            record.lighter_reduce_only and not is_guarded_strategy_close
+        )
+        if is_mandatory_recovery:
             marginal_i = tick_execution[1] if tick_execution is not None else None
             anchor_price_i = best_price_i or marginal_i
             fallback_anchor = record.firm_price or record.var_fill_price
@@ -8163,6 +8250,8 @@ class VariationalToLighterRuntime:
             )
             else None
         )
+        if is_guarded_strategy_close and economic_limit is None:
+            return None, "Normal Lighter close is missing its frozen economic limit"
         economic_limit_price_i: int | None = None
         if economic_limit is not None and price_multiplier > 0:
             economic_limit_price_i = int(
@@ -8173,6 +8262,12 @@ class VariationalToLighterRuntime:
             if economic_limit_price_i <= 0:
                 return None, "Firm Guard produced an invalid Lighter economic limit"
         price_i = configured_price_i
+        if economic_limit_price_i is not None:
+            price_i = (
+                min(price_i, economic_limit_price_i)
+                if lighter_side == "BUY"
+                else max(price_i, economic_limit_price_i)
+            )
         within_limit = marginal_i <= price_i if lighter_side == "BUY" else marginal_i >= price_i
         if not within_limit:
             self.trace_event(
@@ -8188,7 +8283,7 @@ class VariationalToLighterRuntime:
                 configured_limit_price_i=configured_price_i,
                 economic_limit_price_i=economic_limit_price_i,
                 effective_slippage_bps=effective_slippage_bps,
-                reduce_only_recovery=is_reduce_only_recovery,
+                reduce_only_recovery=is_mandatory_recovery,
             )
             return None, "Lighter marginal depth price moved outside the configured IOC limit"
 
@@ -8215,7 +8310,9 @@ class VariationalToLighterRuntime:
             configured_limit_price_i=configured_price_i,
             economic_limit_price_i=economic_limit_price_i,
             effective_slippage_bps=effective_slippage_bps,
-            reduce_only_recovery=is_reduce_only_recovery,
+            reduce_only_recovery=is_mandatory_recovery,
+            guarded_strategy_close=is_guarded_strategy_close,
+            local_price_guard_bypassed=False,
         )
         return snapshot, None
 
@@ -8420,19 +8517,17 @@ class VariationalToLighterRuntime:
         reserve_bps_per_leg: Decimal | None = None,
         sample_notional_usd: Decimal | None = None,
     ) -> Decimal:
-        """Keep post-fill loss samples diagnostic; never raise the signal gate.
+        """Add a small fixed admission margin without chasing historical tails.
 
         Historical adverse fills describe execution quality, not the current
         opportunity. Feeding them back into the signal threshold made the
-        strategy wait for extreme, short-lived dislocations. Bad fills are
-        therefore not allowed to grow the rolling signal threshold dynamically.
-        A small fixed reserve is applied later to the already-fetched Firm
-        Quote, so it adds no network round trip and does not make the visible
-        5m/30m/1h trigger harder to reach.
+        strategy wait for extreme, short-lived dislocations. They remain
+        diagnostic; the live signal uses one symmetric 0.25bps margin and the
+        fresh Firm Quote still performs the authoritative execution check.
         """
 
         del side, notional_usd, reserve_bps_per_leg, sample_notional_usd
-        return Decimal("0")
+        return OPEN_SIGNAL_EXECUTION_HEADROOM_BPS
 
     def firm_open_execution_reserve_bps(
         self,
@@ -9547,8 +9642,9 @@ class VariationalToLighterRuntime:
         """Track recent positive gross-round time without touching I/O paths.
 
         Continuous time and the union of positive intervals in the latest ten
-        seconds are both measured.  A stale/missing evaluation ends the active
-        interval, so a delayed loop cannot manufacture stability evidence.
+        seconds are both measured for diagnostics. Only the current continuous
+        interval may authorize an early close. A stale/missing evaluation ends
+        that interval, so a delayed loop cannot manufacture stability evidence.
         """
 
         if self._close_stability_trade_key != trade_key:
@@ -9596,9 +9692,9 @@ class VariationalToLighterRuntime:
                 0,
                 now_ms - max(self._close_zero_wear_started_ms, cutoff_ms),
             )
-        confirmed = above_zero_wear and (
-            continuous_ms >= CLOSE_ZERO_WEAR_STABILITY_MS
-            or accumulated_ms >= CLOSE_ZERO_WEAR_STABILITY_MS
+        confirmed = (
+            above_zero_wear
+            and continuous_ms >= CLOSE_ZERO_WEAR_STABILITY_MS
         )
         return confirmed, continuous_ms, accumulated_ms
 
@@ -9711,36 +9807,32 @@ class VariationalToLighterRuntime:
         close_candidate = decision.close_candidate
         if close_candidate is not None:
             gross_round_pnl = open_pnl + close_candidate.expected_close_pnl_usd
+            early_exit = (
+                close_candidate.held_seconds
+                < self.strategy_engine.early_exit_seconds
+            )
             stability_passed, continuous_ms, accumulated_ms = (
                 self._update_close_zero_wear_stability(
                     trade_key=current_open.trade_key,
-                    above_zero_wear=gross_round_pnl > Decimal("0"),
+                    above_zero_wear=early_exit and gross_round_pnl > Decimal("0"),
                     now_ms=now_ms,
                 )
             )
             close_candidate = replace(
                 close_candidate,
+                zero_wear_stability_passed=(
+                    early_exit and stability_passed
+                ),
                 zero_wear_continuous_ms=continuous_ms,
                 zero_wear_accumulated_ms=accumulated_ms,
             )
-            if (
-                decision.action is not StrategyAction.CLOSE
-                and gross_round_pnl > Decimal("0")
-                and stability_passed
-            ):
-                close_candidate = replace(
-                    close_candidate,
-                    zero_wear_stability_passed=True,
-                )
+            if early_exit and stability_passed:
                 decision = StrategyDecision(
                     StrategyAction.CLOSE,
                     "close_zero_wear_stability_passed",
                     close_candidate=close_candidate,
                 )
-            elif (
-                decision.action is not StrategyAction.CLOSE
-                and gross_round_pnl > Decimal("0")
-            ):
+            elif early_exit:
                 decision = StrategyDecision(
                     StrategyAction.NO_ACTION,
                     "close_zero_wear_stability_pending",
@@ -10928,6 +11020,8 @@ class VariationalToLighterRuntime:
         raw = str(reason or "-").strip()
         if not raw or raw == "-":
             return "-"
+        if is_zh and raw.startswith("Safety circuit breaker:"):
+            return "连续整轮磨损突破下限，已自动暂停新开仓"
         translated = cls._dashboard_reason_text(raw, is_zh)
         if not is_zh or translated != "状态异常，详情见日志":
             return translated

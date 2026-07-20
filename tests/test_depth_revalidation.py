@@ -84,7 +84,7 @@ class DepthRevalidationTests(unittest.TestCase):
 
         asyncio.run(run_case())
 
-    def test_frozen_firm_economics_do_not_narrow_post_commit_ioc(self):
+    def test_frozen_firm_economics_cap_post_commit_ioc(self):
         async def run_case():
             runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
             runtime.price_multiplier = 100
@@ -120,7 +120,131 @@ class DepthRevalidationTests(unittest.TestCase):
             self.assertIsNotNone(snapshot)
             assert snapshot is not None
             self.assertEqual(snapshot.economic_limit_price_i, 10_101)
-            self.assertEqual(snapshot.price_i, 10_103)
+            self.assertEqual(snapshot.price_i, 10_101)
+
+        asyncio.run(run_case())
+
+    def test_normal_strategy_close_uses_fresh_depth_and_economic_limit(self):
+        async def run_case():
+            runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
+            runtime.price_multiplier = 100
+            runtime.base_amount_multiplier = 1_000
+            runtime.update_lighter_order_book("asks", [["101", "2"]])
+            runtime.lighter_order_book_ready = True
+            runtime.lighter_order_book_nonce = 1236
+            runtime.lighter_book_received_monotonic = time.monotonic()
+            normal_close = OrderLifecycle(
+                trade_key="normal-close",
+                trade_id="normal-close",
+                side="sell",
+                qty=Decimal("1"),
+                asset="BTC",
+                auto_hedge_enabled=True,
+                last_variational_status="filled",
+                firm_price=Decimal("100"),
+                firm_required_pnl=Decimal("-1.01"),
+                strategy_phase="close",
+                strategy_tag=main_module.ADAPTIVE_MODEL_VERSION,
+                lighter_client_order_id=79,
+                lighter_client_order_ids=[79],
+                lighter_reduce_only=True,
+            )
+
+            snapshot, error = await runtime.capture_lighter_hedge_dispatch_snapshot(
+                record=normal_close,
+                lighter_side="BUY",
+                base_amount=1_000,
+                market_generation=runtime.market_generation,
+                market_index=runtime.lighter_market_index,
+            )
+
+            self.assertIsNone(error)
+            self.assertIsNotNone(snapshot)
+            assert snapshot is not None
+            self.assertEqual(snapshot.economic_limit_price_i, 10_101)
+            self.assertEqual(snapshot.price_i, 10_101)
+
+        asyncio.run(run_case())
+
+    def test_normal_strategy_close_never_falls_back_without_economic_limit(self):
+        async def run_case():
+            runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
+            runtime.price_multiplier = 100
+            runtime.base_amount_multiplier = 1_000
+            runtime.update_lighter_order_book("asks", [["101", "2"]])
+            runtime.lighter_order_book_ready = True
+            runtime.lighter_order_book_nonce = 1237
+            runtime.lighter_book_received_monotonic = time.monotonic()
+            incomplete_close = OrderLifecycle(
+                trade_key="incomplete-normal-close",
+                trade_id="incomplete-normal-close",
+                side="sell",
+                qty=Decimal("1"),
+                asset="BTC",
+                auto_hedge_enabled=True,
+                last_variational_status="filled",
+                firm_price=Decimal("100"),
+                strategy_phase="close",
+                strategy_tag=main_module.ADAPTIVE_MODEL_VERSION,
+                lighter_reduce_only=True,
+            )
+
+            snapshot, error = await runtime.capture_lighter_hedge_dispatch_snapshot(
+                record=incomplete_close,
+                lighter_side="BUY",
+                base_amount=1_000,
+                market_generation=runtime.market_generation,
+                market_index=runtime.lighter_market_index,
+            )
+
+            self.assertIsNone(snapshot)
+            self.assertIn("economic limit", error or "")
+
+        asyncio.run(run_case())
+
+    def test_normal_strategy_close_retries_guard_without_market_fallback(self):
+        async def run_case():
+            runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
+            runtime.base_amount_multiplier = 1_000
+            normal_close = OrderLifecycle(
+                trade_key="retry-normal-close",
+                trade_id="retry-normal-close",
+                side="sell",
+                qty=Decimal("1"),
+                asset="BTC",
+                auto_hedge_enabled=True,
+                last_variational_status="filled",
+                firm_price=Decimal("100"),
+                firm_required_pnl=Decimal("-1"),
+                strategy_phase="close",
+                strategy_tag=main_module.ADAPTIVE_MODEL_VERSION,
+                lighter_reduce_only=True,
+            )
+            attempts = 0
+
+            async def reject_snapshot(**_kwargs):
+                nonlocal attempts
+                attempts += 1
+                return None, "protected IOC price unavailable"
+
+            async def persist_noop():
+                return None
+
+            async def unexpected_submit(**_kwargs):
+                raise AssertionError("guarded close must not fall back to market")
+
+            runtime.capture_lighter_hedge_dispatch_snapshot = reject_snapshot
+            runtime.persist_runtime_state = persist_noop
+            runtime.submit_lighter_create_order = unexpected_submit
+
+            await runtime._run_lighter_order_task(normal_close)
+
+            self.assertEqual(
+                attempts,
+                runtime.strategy_config.lighter_hedge_max_attempts,
+            )
+            self.assertEqual(normal_close.hedge_status, "error")
+            self.assertTrue(runtime.automation_paused)
 
         asyncio.run(run_case())
 

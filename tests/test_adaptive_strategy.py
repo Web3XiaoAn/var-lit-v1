@@ -1248,7 +1248,7 @@ def test_captured_template_target_can_differ_from_sampling_notional(model):
 
 def test_close_floors(model):
     cases = [
-        (1_000, D("0.05"), D("-0.0001"), Action.CLOSE, D("0")),
+        (1_000, D("0.05"), D("-0.0001"), Action.NO_ACTION, D("0")),
         (1_000, D("0"), D("-0.0001"), Action.NO_ACTION, D("0")),
         (1_900, D("0"), D("0"), Action.CLOSE, D("-0.02")),
         (7_300, D("0.05"), D("-0.0001"), Action.CLOSE, D("-0.02")),
@@ -1353,7 +1353,7 @@ def test_close_requires_weighted_baseline_regression_and_pnl_floor(model):
     position = PositionContext(
         "adaptive-median-v1",
         Side.BUY,
-        now_ms - 10 * 60 * 1_000,
+        now_ms - 31 * 60 * 1_000,
         D("2"),
         D("200"),
         D("1"),

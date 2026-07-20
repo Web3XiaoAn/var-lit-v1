@@ -370,7 +370,16 @@ class StrategyEngine:
             max_hold_alert=max_hold_alert,
         )
         regression_required = epoch.model_version == "adaptive-median-v1"
-        if lower_bound >= floor and (regression_passed or not regression_required):
+        floor_passed = lower_bound >= floor and (
+            regression_passed or not regression_required
+        )
+        if floor_passed and held_seconds < self.early_exit_seconds:
+            return Decision(
+                Action.NO_ACTION,
+                "close_early_stability_required",
+                close_candidate=candidate,
+            )
+        if floor_passed:
             reason = "max_hold_alert_floor_passed" if max_hold_alert else "close_floor_passed"
             return Decision(Action.CLOSE, reason, close_candidate=candidate)
         if regression_required and not regression_passed:
