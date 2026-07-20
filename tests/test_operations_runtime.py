@@ -79,7 +79,7 @@ class OperationsRuntimeTests(unittest.TestCase):
             patcher.stop()
         cls.temp_dir.cleanup()
 
-    def test_snapshot_uses_last_ten_final_two_sided_fill_rounds(self) -> None:
+    def test_snapshot_uses_fixed_ten_round_batches(self) -> None:
         async def run_case() -> None:
             runtime = TrackingRuntime()
             runtime.variational_ticker = "BTC"
@@ -174,13 +174,13 @@ class OperationsRuntimeTests(unittest.TestCase):
             snapshot = await runtime.operations_dashboard_snapshot()
 
             self.assertEqual(snapshot["environment"], "runtime")
-            self.assertEqual(len(snapshot["recentRounds"]), 10)
-            self.assertEqual(snapshot["recentRounds"][0]["number"], 3)
-            self.assertEqual(snapshot["metrics"]["totalOpenWear"], "10")
-            self.assertEqual(snapshot["metrics"]["totalCloseWear"], "-5.0")
-            self.assertEqual(snapshot["metrics"]["totalWear"], "5.0")
+            self.assertEqual(len(snapshot["recentRounds"]), 2)
+            self.assertEqual(snapshot["recentRounds"][0]["number"], 1)
+            self.assertEqual(snapshot["metrics"]["totalOpenWear"], "2")
+            self.assertEqual(snapshot["metrics"]["totalCloseWear"], "-1.0")
+            self.assertEqual(snapshot["metrics"]["totalWear"], "1.0")
             self.assertEqual(snapshot["metrics"]["averageWear"], "0.5")
-            self.assertEqual(snapshot["metrics"]["positiveRounds"], 10)
+            self.assertEqual(snapshot["metrics"]["positiveRounds"], 2)
             current_basis = snapshot["metrics"]["currentBasis"]
             self.assertTrue(current_basis["fresh"])
             self.assertEqual(current_basis["referenceLongVar"], "0.0007")

@@ -160,6 +160,7 @@ class OperationsDashboardServerTests(unittest.TestCase):
         self.assertIn("开仓收益", source)
         self.assertIn("开仓基差", source)
         self.assertIn("此时平仓磨损", source)
+        self.assertIn("round.recovery && hasWear ? '保护回退'", source)
         self.assertIn("平仓预留", source)
         self.assertIn("positionPnl.closeEstimate", source)
         self.assertIn("positionPnl.closeReserve", source)

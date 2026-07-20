@@ -134,6 +134,8 @@ RUNTIME_BUILD = "var-lit-v1"
 # restart does not discard the existing live execution-loss samples.
 EXECUTION_SAMPLE_VERSION = "2026-07-15-adaptive-median-v4-live2"
 SETTLED_EXECUTION_HISTORY_LIMIT = 100
+DASHBOARD_ROUND_BATCH_SIZE = 10
+DASHBOARD_ROUND_BATCH_VERSION = 1
 READY_TIMEOUT_SECONDS = 60.0
 VARIATIONAL_PAGE_REFRESH_SECONDS = 6 * 60 * 60
 VARIATIONAL_PAGE_REFRESH_RETRY_SECONDS = 10 * 60
@@ -1905,8 +1907,24 @@ def build_trade_rounds(records: list[OrderLifecycle]) -> tuple[OrderLifecycle | 
             open_result = leg_result_by_direction(current_open)
             close_result = leg_result_by_direction(record)
             round_pnl = actual_round_pnl(current_open, record)
+            open_lighter_qty = actual_lighter_fill_qty(current_open)
+            close_lighter_qty = actual_lighter_fill_qty(record)
+            recovery = (
+                record.strategy_phase == "emergency_close"
+                or open_lighter_qty != current_open.qty
+                or close_lighter_qty != record.qty
+            )
             if round_pnl is not None:
-                open_pnl = open_result.pnl or Decimal("0")
+                # An incomplete hedge has no final two-sided open price.  Use
+                # its confirmed Firm-guard mark, then assign the exact residual
+                # to closing so both legs remain useful and still sum exactly.
+                open_pnl = (
+                    current_open.firm_guard_pnl
+                    if recovery
+                    and open_lighter_qty != current_open.qty
+                    and current_open.firm_guard_pnl is not None
+                    else (open_result.pnl or Decimal("0"))
+                )
                 open_result = LegResult(
                     price_diff=open_result.price_diff,
                     pct=open_result.pct,
@@ -1917,8 +1935,6 @@ def build_trade_rounds(records: list[OrderLifecycle]) -> tuple[OrderLifecycle | 
                     pct=close_result.pct,
                     pnl=round_pnl - open_pnl,
                 )
-            open_lighter_qty = actual_lighter_fill_qty(current_open)
-            close_lighter_qty = actual_lighter_fill_qty(record)
             history.append(
                 TradeRound(
                     open_record=current_open,
@@ -1926,11 +1942,7 @@ def build_trade_rounds(records: list[OrderLifecycle]) -> tuple[OrderLifecycle | 
                     open_result=open_result,
                     close_result=close_result,
                     round_pnl=round_pnl,
-                    recovery=(
-                        record.strategy_phase == "emergency_close"
-                        or open_lighter_qty != current_open.qty
-                        or close_lighter_qty != record.qty
-                    ),
+                    recovery=recovery,
                 )
             )
             current_open = None
@@ -2280,6 +2292,9 @@ class VariationalToLighterRuntime:
 
         self.records: dict[str, OrderLifecycle] = {}
         self.record_order: deque[str] = deque()
+        self._dashboard_round_batch: list[dict[str, Any]] = []
+        self._dashboard_round_seen_keys: set[str] = set()
+        self._dashboard_round_cursor_ms: int | None = None
         self.lighter_client_order_to_trade_key: dict[int, str] = {}
         self.lighter_order_fill_totals: dict[int, tuple[Decimal, Decimal]] = {}
         self.lighter_order_terminal_ids: set[int] = set()
@@ -2477,6 +2492,108 @@ class VariationalToLighterRuntime:
         self._reconcile_mismatch_first_token: str | None = None
         self._reconcile_mismatch_first_monotonic: float | None = None
 
+    def _dashboard_round_strategy_id(self) -> str:
+        return ":".join(
+            (
+                str(DASHBOARD_ROUND_BATCH_VERSION),
+                self.strategy_model.model_hash,
+                self.strategy_config_hash,
+            )
+        )
+
+    @staticmethod
+    def _dashboard_round_row(trade_round: TradeRound) -> dict[str, Any]:
+        close_at = parse_iso_datetime(trade_round.close_record.var_fill_ts_iso)
+        long_var = trade_round.open_record.side.strip().lower() == "buy"
+        return {
+            "key": (
+                f"{trade_round.open_record.trade_key}|"
+                f"{trade_round.close_record.trade_key}"
+            ),
+            "closedAtMs": int(close_at.timestamp() * 1000) if close_at else None,
+            "directionKey": "long_var" if long_var else "short_var",
+            "direction": "多 Var / 空 Lighter" if long_var else "空 Var / 多 Lighter",
+            "openWear": decimal_to_str(trade_round.open_result.pnl),
+            "closeWear": decimal_to_str(trade_round.close_result.pnl),
+            "roundWear": decimal_to_str(trade_round.round_pnl),
+            "recovery": trade_round.recovery,
+        }
+
+    def _merge_dashboard_rounds_locked(
+        self,
+        completed_rounds: list[TradeRound],
+    ) -> None:
+        positions = {
+            str(row["key"]): index
+            for index, row in enumerate(self._dashboard_round_batch)
+        }
+        for trade_round in completed_rounds:
+            if trade_round.round_pnl is None:
+                continue
+            row = self._dashboard_round_row(trade_round)
+            key = str(row["key"])
+            if key in positions:
+                self._dashboard_round_batch[positions[key]] = row
+                continue
+            if key in self._dashboard_round_seen_keys:
+                continue
+            closed_at_ms = row["closedAtMs"]
+            if (
+                isinstance(closed_at_ms, int)
+                and self._dashboard_round_cursor_ms is not None
+                and closed_at_ms <= self._dashboard_round_cursor_ms
+            ):
+                self._dashboard_round_seen_keys.add(key)
+                continue
+            if len(self._dashboard_round_batch) >= DASHBOARD_ROUND_BATCH_SIZE:
+                self._dashboard_round_batch.clear()
+                positions.clear()
+            positions[key] = len(self._dashboard_round_batch)
+            self._dashboard_round_batch.append(row)
+            self._dashboard_round_seen_keys.add(key)
+            if isinstance(closed_at_ms, int):
+                self._dashboard_round_cursor_ms = max(
+                    self._dashboard_round_cursor_ms or closed_at_ms,
+                    closed_at_ms,
+                )
+
+    def _restore_dashboard_round_batch(self, payload: dict[str, Any]) -> None:
+        if (
+            payload.get("dashboard_round_strategy_id")
+            != self._dashboard_round_strategy_id()
+        ):
+            return
+        raw_batch = payload.get("dashboard_round_batch")
+        raw_cursor = payload.get("dashboard_round_cursor_ms")
+        if not isinstance(raw_batch, list):
+            return
+        restored: list[dict[str, Any]] = []
+        for row in raw_batch[-DASHBOARD_ROUND_BATCH_SIZE:]:
+            if (
+                not isinstance(row, dict)
+                or not str(row.get("key") or "").strip()
+                or row.get("directionKey") not in {"long_var", "short_var"}
+                or not isinstance(row.get("direction"), str)
+                or not isinstance(row.get("recovery"), bool)
+                or any(
+                    to_decimal(row.get(key)) is None
+                    for key in ("openWear", "closeWear", "roundWear")
+                )
+            ):
+                continue
+            restored.append(copy.deepcopy(row))
+        self._dashboard_round_batch = restored
+        self._dashboard_round_seen_keys = {
+            str(row["key"]) for row in restored
+        }
+        self._dashboard_round_cursor_ms = (
+            raw_cursor
+            if isinstance(raw_cursor, int)
+            and not isinstance(raw_cursor, bool)
+            and raw_cursor >= 0
+            else None
+        )
+
     async def persist_runtime_state(self) -> None:
         # Serialize the complete snapshot-and-write operation.  Taking a
         # snapshot before waiting for the write lock allows an older caller to
@@ -2490,6 +2607,8 @@ class VariationalToLighterRuntime:
                     for key in self.record_order
                     if key in self.records
                 ]
+                _current_open, completed_rounds = build_trade_rounds(ordered_records)
+                self._merge_dashboard_rounds_locked(completed_rounds)
                 recovery_records = runtime_recovery_records(ordered_records)
                 records = copy.deepcopy(
                     [record.to_payload() for record in recovery_records]
@@ -2590,6 +2709,11 @@ class VariationalToLighterRuntime:
                     "automation_paused": self.automation_paused,
                     "automation_pause_reason": self.automation_pause_reason,
                     "operator_open_paused": self.operator_open_paused,
+                    "dashboard_round_strategy_id": self._dashboard_round_strategy_id(),
+                    "dashboard_round_cursor_ms": self._dashboard_round_cursor_ms,
+                    "dashboard_round_batch": copy.deepcopy(
+                        self._dashboard_round_batch
+                    ),
                 }
             state_sig = json.dumps(
                 payload,
@@ -2861,6 +2985,8 @@ class VariationalToLighterRuntime:
                 )
             if not flat_v4_telemetry_migration and not manual_only_model_migration:
                 return False
+
+        self._restore_dashboard_round_batch(payload)
 
         loaded_records: list[OrderLifecycle] = []
         loaded_trade_keys: set[str] = set()
@@ -5852,6 +5978,9 @@ class VariationalToLighterRuntime:
         async with self._record_lock:
             self.records.clear()
             self.record_order.clear()
+            self._dashboard_round_batch.clear()
+            self._dashboard_round_seen_keys.clear()
+            self._dashboard_round_cursor_ms = None
             self.lighter_client_order_to_trade_key.clear()
             self.lighter_order_fill_totals.clear()
             self.lighter_order_terminal_ids.clear()
@@ -12167,8 +12296,9 @@ class VariationalToLighterRuntime:
                 for key in self.record_order
                 if key in self.records
             ]
-        _current, completed_rounds = build_trade_rounds(ordered_records)
-        recent_rounds = completed_rounds[-10:]
+            _current, completed_rounds = build_trade_rounds(ordered_records)
+            self._merge_dashboard_rounds_locked(completed_rounds)
+            dashboard_rounds = copy.deepcopy(self._dashboard_round_batch)
         normal_wear_usd = (
             self.strategy_config.order_notional_usd
             * self.strategy_config.max_normal_round_wear_bps
@@ -12197,11 +12327,10 @@ class VariationalToLighterRuntime:
         total_close = Decimal("0")
         positive_rounds = 0
         negative_rounds = 0
-        first_number = len(completed_rounds) - len(recent_rounds) + 1
-        for offset, trade_round in enumerate(recent_rounds):
-            open_pnl = trade_round.open_result.pnl
-            close_pnl = trade_round.close_result.pnl
-            round_pnl = trade_round.round_pnl
+        for offset, row in enumerate(dashboard_rounds):
+            open_pnl = to_decimal(row.get("openWear"))
+            close_pnl = to_decimal(row.get("closeWear"))
+            round_pnl = to_decimal(row.get("roundWear"))
             if open_pnl is not None:
                 total_open += open_pnl
             if close_pnl is not None:
@@ -12210,20 +12339,15 @@ class VariationalToLighterRuntime:
                 positive_rounds += 1
             elif round_pnl is not None:
                 negative_rounds += 1
-            long_var = trade_round.open_record.side.strip().lower() == "buy"
             round_rows.append(
                 {
-                    "number": first_number + offset,
-                    "directionKey": "long_var" if long_var else "short_var",
-                    "direction": (
-                        "多 Var / 空 Lighter"
-                        if long_var
-                        else "空 Var / 多 Lighter"
-                    ),
+                    "number": offset + 1,
+                    "directionKey": row["directionKey"],
+                    "direction": row["direction"],
                     "openWear": decimal_to_str(open_pnl),
                     "closeWear": decimal_to_str(close_pnl),
                     "roundWear": decimal_to_str(round_pnl),
-                    "recovery": trade_round.recovery,
+                    "recovery": row["recovery"],
                     "withinLimit": bool(
                         round_pnl is not None and round_pnl >= -normal_wear_usd
                     ),
@@ -12231,14 +12355,15 @@ class VariationalToLighterRuntime:
             )
         total_round = sum(
             (
-                trade_round.round_pnl
-                for trade_round in recent_rounds
-                if trade_round.round_pnl is not None
+                to_decimal(row.get("roundWear")) or Decimal("0")
+                for row in dashboard_rounds
             ),
             Decimal("0"),
         )
         completed_with_pnl = sum(
-            1 for trade_round in recent_rounds if trade_round.round_pnl is not None
+            1
+            for row in dashboard_rounds
+            if to_decimal(row.get("roundWear")) is not None
         )
         average_round = (
             total_round / Decimal(completed_with_pnl)

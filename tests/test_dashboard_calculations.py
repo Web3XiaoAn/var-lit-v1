@@ -214,6 +214,7 @@ class DashboardCalculationTests(unittest.TestCase):
             auto_hedge_enabled=True,
             last_variational_status="filled",
             var_fill_price=Decimal("65266.92"),
+            firm_guard_pnl=Decimal("-0.2664964"),
             strategy_phase="open",
             hedge_status="error",
         )
@@ -235,8 +236,8 @@ class DashboardCalculationTests(unittest.TestCase):
         self.assertIsNone(current_open)
         self.assertEqual(len(history), 1)
         self.assertTrue(history[0].recovery)
-        self.assertEqual(history[0].open_result.pnl, Decimal("0"))
-        self.assertEqual(history[0].close_result.pnl, Decimal("-0.0389000"))
+        self.assertEqual(history[0].open_result.pnl, Decimal("-0.2664964"))
+        self.assertEqual(history[0].close_result.pnl, Decimal("0.2275964"))
         self.assertEqual(history[0].round_pnl, Decimal("-0.0389000"))
 
     def test_partial_lighter_recovery_includes_unhedged_var_quantity(self) -> None:
@@ -250,6 +251,7 @@ class DashboardCalculationTests(unittest.TestCase):
         open_record.strategy_phase = "open"
         open_record.hedge_status = "error"
         open_record.lighter_filled_qty = Decimal("0.001")
+        open_record.firm_guard_pnl = Decimal("-0.268410")
         close_record = make_record(
             "partial-recovery",
             "buy",
@@ -263,10 +265,66 @@ class DashboardCalculationTests(unittest.TestCase):
 
         _current_open, history = build_trade_rounds([open_record, close_record])
 
-        self.assertEqual(history[0].open_result.pnl, Decimal("-0.0349"))
-        self.assertEqual(history[0].close_result.pnl, Decimal("0.0005562"))
+        self.assertEqual(history[0].open_result.pnl, Decimal("-0.268410"))
+        self.assertEqual(history[0].close_result.pnl, Decimal("0.2340662"))
         self.assertEqual(history[0].round_pnl, Decimal("-0.0343438"))
         self.assertTrue(history[0].recovery)
+
+    def test_incomplete_dashboard_batch_survives_runtime_restart(self) -> None:
+        async def run_case() -> None:
+            source = VariationalToLighterRuntime(
+                Namespace(auto_hedge=True, lang="zh")
+            )
+            source.variational_ticker = "BTC"
+            source.ticker = "BTC"
+            opened = OrderLifecycle(
+                trade_key="persisted-open",
+                trade_id="persisted-open",
+                side="sell",
+                qty=Decimal("1"),
+                asset="BTC",
+                auto_hedge_enabled=True,
+                last_variational_status="filled",
+                var_fill_price=Decimal("100"),
+                var_fill_ts_iso="2026-01-01T00:00:00+00:00",
+                firm_guard_pnl=Decimal("-0.20"),
+            )
+            closed = OrderLifecycle(
+                trade_key="persisted-close",
+                trade_id="persisted-close",
+                side="buy",
+                qty=Decimal("1"),
+                asset="BTC",
+                auto_hedge_enabled=True,
+                last_variational_status="filled",
+                var_fill_price=Decimal("100.05"),
+                var_fill_ts_iso="2026-01-01T00:00:01+00:00",
+            )
+            source.records = {
+                opened.trade_key: opened,
+                closed.trade_key: closed,
+            }
+            source.record_order.extend((opened.trade_key, closed.trade_key))
+
+            with tempfile.TemporaryDirectory(prefix="dashboard-batch-") as tmp:
+                state_file = Path(tmp) / "runtime_state.json"
+                with patch.object(main_module, "RUNTIME_STATE_FILE", state_file):
+                    await source.persist_runtime_state()
+                    restored = VariationalToLighterRuntime(
+                        Namespace(auto_hedge=True, lang="zh")
+                    )
+                    restored.variational_ticker = "BTC"
+                    restored.ticker = "BTC"
+                    self.assertTrue(await restored.load_runtime_state("BTC"))
+
+            self.assertEqual(len(restored._dashboard_round_batch), 1)
+            row = restored._dashboard_round_batch[0]
+            self.assertEqual(row["openWear"], "-0.20")
+            self.assertEqual(row["closeWear"], "0.15")
+            self.assertEqual(row["roundWear"], "-0.05")
+            self.assertTrue(row["recovery"])
+
+        asyncio.run(run_case())
 
     def test_mismatched_partial_close_is_not_reinterpreted_as_reverse_open(self) -> None:
         open_record = make_record("open", "buy", "0.005", "1000", "1001")

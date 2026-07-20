@@ -828,11 +828,6 @@ class ResearchDatabase:
         )
         open_pnl = _leg_pnl(open_payload)
         round_pnl = _actual_round_pnl(open_payload, close_payload)
-        if round_pnl is not None:
-            open_pnl = open_pnl or Decimal("0")
-            close_pnl = round_pnl - open_pnl
-        else:
-            close_pnl = _leg_pnl(close_payload)
         open_lighter_qty, _open_lighter_quote = _actual_lighter_fill(open_payload)
         close_lighter_qty, _close_lighter_quote = _actual_lighter_fill(close_payload)
         recovery = bool(
@@ -841,6 +836,16 @@ class ResearchDatabase:
             or open_lighter_qty != qty
             or close_lighter_qty != qty
         )
+        if round_pnl is not None:
+            firm_guard_pnl = _decimal(open_payload.get("firm_guard_pnl"))
+            open_pnl = (
+                firm_guard_pnl
+                if recovery and open_lighter_qty != qty and firm_guard_pnl is not None
+                else (open_pnl or Decimal("0"))
+            )
+            close_pnl = round_pnl - open_pnl
+        else:
+            close_pnl = _leg_pnl(close_payload)
         open_loss = _execution_loss(open_payload) or Decimal("0")
         close_loss = _execution_loss(close_payload) or Decimal("0")
         open_loss_bps = (

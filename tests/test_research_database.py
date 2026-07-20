@@ -275,6 +275,7 @@ class ResearchDatabaseTests(unittest.TestCase):
                     "asset": "BTC",
                     "strategy_tag": "adaptive-median-v6",
                     "variational_filled_price": "65266.92",
+                    "firm_guard_pnl": "-0.2664964",
                     "hedge_status": "error",
                 },
                 {
@@ -311,7 +312,10 @@ class ResearchDatabaseTests(unittest.TestCase):
                     """
                 ).fetchone()
             self.assertIsNotNone(row)
-            self.assertEqual(row[:3], ("0", "-0.0389000", "-0.0389000"))
+            self.assertEqual(
+                row[:3],
+                ("-0.2664964", "0.2275964", "-0.0389000"),
+            )
             self.assertEqual(json.loads(row[3])["round_class"], "protective_recovery")
 
     def test_late_var_fill_replaces_provisional_close_loss(self) -> None:
