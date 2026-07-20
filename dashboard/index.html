@@ -196,24 +196,45 @@
     .basis-strip {
       min-height: 66px;
       display: grid;
-      grid-template-columns: minmax(160px, .7fr) repeat(4, minmax(0, 1fr));
-      align-items: center;
+      grid-template-columns: minmax(145px, .65fr) repeat(4, minmax(0, 1fr));
+      grid-template-areas:
+        "heading current open threshold position"
+        "heading m5 m30 m1 position";
+      align-items: stretch;
       padding: 10px 14px;
     }
-    .basis-heading { min-width: 0; display: grid; gap: 4px; }
+    .basis-heading { grid-area: heading; min-width: 0; display: grid; align-content: center; gap: 4px; }
     .basis-title { display: flex; align-items: center; gap: 8px; }
     .basis-window {
       min-width: 0;
       display: grid;
+      align-content: center;
       gap: 5px;
       padding: 0 14px;
       border-left: 1px solid var(--line);
+    }
+    .basis-live { grid-area: current; }
+    .basis-open-preview { grid-area: open; }
+    .basis-threshold { grid-area: threshold; }
+    .basis-5m { grid-area: m5; }
+    .basis-30m { grid-area: m30; }
+    .basis-1h { grid-area: m1; }
+    .position-pnl { grid-area: position; }
+    .basis-5m,
+    .basis-30m,
+    .basis-1h {
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid var(--line);
     }
     .basis-window-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     .basis-period { font-weight: 700; }
     .basis-status { color: var(--muted-2); font-size: 11px; white-space: nowrap; }
     .basis-status.ready { color: var(--green); }
     .basis-values { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; }
+    .basis-stack { display: grid; gap: 5px; font-size: 12px; }
+    .basis-row { display: grid; grid-template-columns: minmax(48px, auto) repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .basis-row-label { color: var(--muted); white-space: nowrap; }
     .basis-value { white-space: nowrap; font-variant-numeric: tabular-nums; }
     .basis-side { margin-right: 5px; color: var(--muted); }
     .basis-side.long { color: var(--green); }
@@ -436,9 +457,23 @@
       .middle-grid > .panel { min-height: 0; }
       .connection-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .stream-meta { display: none; }
-      .basis-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-      .basis-heading { grid-column: 1 / -1; margin-bottom: 7px; }
-      .basis-window:first-of-type { border-left: 0; padding-left: 0; }
+      .basis-strip {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-areas:
+          "heading heading heading"
+          "current open threshold"
+          "m5 m30 m1"
+          "position position position";
+      }
+      .basis-heading { margin-bottom: 7px; }
+      .basis-live,
+      .basis-5m,
+      .position-pnl { border-left: 0; padding-left: 0; }
+      .position-pnl {
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid var(--line);
+      }
     }
     @media (max-width: 760px) {
       .app { grid-template-columns: 1fr; }
@@ -450,6 +485,24 @@
       .topbar-right .popover-anchor:first-of-type { margin-left: auto; }
       .action-main { grid-template-columns: minmax(118px, .8fr) minmax(0, 1.2fr) 68px; }
       .connection-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .basis-strip {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-areas:
+          "heading heading"
+          "current current"
+          "open threshold"
+          "m5 m30"
+          "m1 position";
+      }
+      .basis-live {
+        padding: 8px 0 0;
+        border-top: 1px solid var(--line);
+      }
+      .basis-open-preview,
+      .basis-5m,
+      .basis-1h { border-left: 0; padding-left: 0; }
+      .basis-open-preview,
+      .basis-threshold { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
     }
     @media (max-width: 500px) {
       .shell { gap: 8px; padding-inline: 6px; }
@@ -458,10 +511,21 @@
       .metric-value { font-size: 19px; }
       .mode-select { flex: 1 1 180px; width: auto; min-width: 0; }
       .warning-text { width: 100%; }
-      .basis-strip { grid-template-columns: 1fr; }
+      .basis-strip {
+        grid-template-columns: 1fr;
+        grid-template-areas:
+          "heading"
+          "current"
+          "open"
+          "threshold"
+          "m5"
+          "m30"
+          "m1"
+          "position";
+      }
       .basis-heading { margin-bottom: 0; }
-      .basis-window,
-      .basis-window:first-of-type {
+      .basis-window {
+        margin-top: 0;
         padding: 8px 0 0;
         border-top: 1px solid var(--line);
         border-left: 0;
@@ -576,29 +640,48 @@
         </article>
       </section>
 
-      <section class="card basis-strip" aria-label="5m、30m、1h 基差中位数与当前持仓收益">
+      <section class="card basis-strip" aria-label="实时基差、预估开仓收益、开仓门槛、三窗中位数与当前持仓收益">
         <div class="basis-heading">
           <div class="basis-title">
             <span class="metric-icon"><svg class="icon" viewBox="0 0 24 24"><path d="M4 16l4-5 4 3 4-7 4 3"/></svg></span>
-            <strong>基差中位数</strong>
+            <strong>实时数据与收益</strong>
           </div>
-          <span class="small muted">Runtime 统计 · 面板只读</span>
+          <span class="small muted">实时 + 统计 · 面板只读</span>
         </div>
-        <div class="basis-window">
+        <div class="basis-window basis-live">
+          <div class="basis-window-head"><span class="basis-period">实时基差</span><span class="basis-status" id="current-basis-status">等待行情</span></div>
+          <div class="basis-stack">
+            <div class="basis-row"><span class="basis-row-label" id="basis-reference-label">500U</span><span class="basis-value"><span class="basis-side long">多</span><strong id="basis-reference-long">—</strong></span><span class="basis-value"><span class="basis-side short">空</span><strong id="basis-reference-short">—</strong></span></div>
+            <div class="basis-row"><span class="basis-row-label" id="basis-actual-label">开仓额</span><span class="basis-value"><span class="basis-side long">多</span><strong id="basis-actual-long">—</strong></span><span class="basis-value"><span class="basis-side short">空</span><strong id="basis-actual-short">—</strong></span></div>
+          </div>
+        </div>
+        <div class="basis-window basis-open-preview">
+          <div class="basis-window-head"><span class="basis-period">预估开仓 PnL</span><span class="basis-status" id="open-preview-status">等待行情</span></div>
+          <div class="basis-values"><span class="basis-value"><span class="basis-side long">多 Var</span><strong id="open-preview-long">—</strong></span><span class="basis-value"><span class="basis-side short">空 Var</span><strong id="open-preview-short">—</strong></span></div>
+        </div>
+        <div class="basis-window basis-threshold">
+          <div class="basis-window-head"><span class="basis-period">开仓门槛</span><span class="basis-status" id="open-threshold-status">等待参数</span></div>
+          <div class="basis-values"><span class="basis-value"><span class="basis-side long">多 Var</span><strong id="open-threshold-long">—</strong></span><span class="basis-value"><span class="basis-side short">空 Var</span><strong id="open-threshold-short">—</strong></span></div>
+        </div>
+        <div class="basis-window basis-5m">
           <div class="basis-window-head"><span class="basis-period">5m</span><span class="basis-status" id="median-5m-status">等待样本</span></div>
           <div class="basis-values"><span class="basis-value"><span class="basis-side long">多 Var</span><strong id="median-5m-long">—</strong></span><span class="basis-value"><span class="basis-side short">空 Var</span><strong id="median-5m-short">—</strong></span></div>
         </div>
-        <div class="basis-window">
+        <div class="basis-window basis-30m">
           <div class="basis-window-head"><span class="basis-period">30m</span><span class="basis-status" id="median-30m-status">等待样本</span></div>
           <div class="basis-values"><span class="basis-value"><span class="basis-side long">多 Var</span><strong id="median-30m-long">—</strong></span><span class="basis-value"><span class="basis-side short">空 Var</span><strong id="median-30m-short">—</strong></span></div>
         </div>
-        <div class="basis-window">
+        <div class="basis-window basis-1h">
           <div class="basis-window-head"><span class="basis-period">1h</span><span class="basis-status" id="median-1h-status">等待样本</span></div>
           <div class="basis-values"><span class="basis-value"><span class="basis-side long">多 Var</span><strong id="median-1h-long">—</strong></span><span class="basis-value"><span class="basis-side short">空 Var</span><strong id="median-1h-short">—</strong></span></div>
         </div>
-        <div class="basis-window">
+        <div class="basis-window position-pnl">
           <div class="basis-window-head"><span class="basis-period">当前持仓收益</span><span class="basis-status" id="position-pnl-status">当前无持仓</span></div>
-          <div class="basis-values"><span class="basis-value"><span class="basis-side">开仓收益</span><strong id="position-open-pnl">—</strong></span><span class="basis-value"><span class="basis-side">平仓预估收益</span><strong id="position-close-pnl">—</strong></span></div>
+          <div class="basis-stack">
+            <span class="basis-value"><span class="basis-side">开仓收益</span><strong id="position-open-pnl">—</strong></span>
+            <span class="basis-value"><span class="basis-side">此时平仓磨损</span><strong id="position-close-pnl">—</strong></span>
+            <span class="basis-value"><span class="basis-side">平仓预留</span><strong id="position-close-reserve">—</strong></span>
+          </div>
         </div>
       </section>
 
@@ -757,6 +840,9 @@
       };
       const formatRate = (value) => (
         value == null ? '—' : formatSigned(Number(value) * 100, 5, '%')
+      );
+      const formatNotional = (value) => (
+        value == null ? '—' : `${Number(value).toLocaleString('en-US', { maximumFractionDigits: 2 })}U`
       );
       const stateText = (ok, good, bad) => ok ? good : bad;
       const setDot = (element, tone) => {
@@ -996,6 +1082,38 @@
         setText('round-note', metrics.currentRoundNote || '当前无持仓');
         setText('average-wear', formatSigned(metrics.averageWear, 6, ' U'));
         setText('average-note', `合计 ${formatSigned(metrics.totalWear, 6, ' U')} · 正 ${metrics.positiveRounds ?? 0} / 负 ${metrics.negativeRounds ?? 0}`);
+        const currentBasis = metrics.currentBasis || {};
+        const currentBasisReady = [
+          currentBasis.referenceLongVar,
+          currentBasis.referenceShortVar,
+          currentBasis.actualLongVar,
+          currentBasis.actualShortVar,
+        ].every((value) => value != null);
+        setText('basis-reference-label', `${formatNotional(currentBasis.referenceNotionalUsd)}参考`);
+        setText('basis-actual-label', `${formatNotional(currentBasis.actualNotionalUsd)}开仓`);
+        setText('basis-reference-long', formatRate(currentBasis.referenceLongVar));
+        setText('basis-reference-short', formatRate(currentBasis.referenceShortVar));
+        setText('basis-actual-long', formatRate(currentBasis.actualLongVar));
+        setText('basis-actual-short', formatRate(currentBasis.actualShortVar));
+        setText('current-basis-status', currentBasisReady ? '实时' : '等待行情');
+        $('current-basis-status').classList.toggle('ready', currentBasisReady);
+        const openPreviewReady = currentBasis.estimatedOpenLongUsd != null
+          && currentBasis.estimatedOpenShortUsd != null;
+        for (const [id, value] of [
+          ['open-preview-long', currentBasis.estimatedOpenLongUsd],
+          ['open-preview-short', currentBasis.estimatedOpenShortUsd],
+        ]) {
+          setText(id, value == null ? '—' : formatSigned(value, 4, ' U'));
+          setTone($(id), value == null ? '' : Number(value) >= 0 ? 'good' : 'bad');
+        }
+        setText('open-preview-status', openPreviewReady ? `${formatNotional(currentBasis.actualNotionalUsd)}开仓额` : '等待行情');
+        $('open-preview-status').classList.toggle('ready', openPreviewReady);
+        const openThresholds = metrics.openThresholds || {};
+        const thresholdsReady = openThresholds.longVar != null && openThresholds.shortVar != null;
+        setText('open-threshold-long', formatRate(openThresholds.longVar));
+        setText('open-threshold-short', formatRate(openThresholds.shortVar));
+        setText('open-threshold-status', thresholdsReady ? '运行值' : '等待参数');
+        $('open-threshold-status').classList.toggle('ready', thresholdsReady);
         for (const window of ['5m', '30m', '1h']) {
           const median = metrics.basisMedians?.[window] || {};
           const status = $(`median-${window}-status`);
@@ -1009,6 +1127,7 @@
         for (const [id, value] of [
           ['position-open-pnl', positionPnl.open],
           ['position-close-pnl', positionPnl.closeEstimate],
+          ['position-close-reserve', positionPnl.closeReserve],
         ]) {
           setText(id, value == null ? '—' : formatSigned(value, 4, ' U'));
           setTone($(id), value == null ? '' : Number(value) >= 0 ? 'good' : 'bad');

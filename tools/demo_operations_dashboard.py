@@ -128,6 +128,20 @@ class DemoRuntime:
                 "averageWear": f"{total / len(self.rounds):.6f}",
                 "positiveRounds": positive,
                 "negativeRounds": len(self.rounds) - positive,
+                "currentBasis": {
+                    "referenceLongVar": "0.0006123",
+                    "referenceShortVar": "-0.0007058",
+                    "actualLongVar": "0.0006049",
+                    "actualShortVar": "-0.0007097",
+                    "referenceNotionalUsd": "500",
+                    "actualNotionalUsd": self.config["orderNotionalUsd"],
+                    "estimatedOpenLongUsd": "0.30245",
+                    "estimatedOpenShortUsd": "-0.35485",
+                },
+                "openThresholds": {
+                    "longVar": "0.0006379",
+                    "shortVar": "-0.0006940",
+                },
                 "basisMedians": {
                     "5m": {
                         "longVar": "0.0004821",
@@ -151,7 +165,8 @@ class DemoRuntime:
                 "currentPositionPnl": {
                     "active": has_position,
                     "open": "0.0060" if has_position else None,
-                    "closeEstimate": "-0.0347" if has_position else None,
+                    "closeEstimate": "-0.0240" if has_position else None,
+                    "closeReserve": "-0.0107" if has_position else None,
                 },
             },
             "recentRounds": copy.deepcopy(self.rounds),

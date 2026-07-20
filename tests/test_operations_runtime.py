@@ -87,6 +87,39 @@ class OperationsRuntimeTests(unittest.TestCase):
                 Decimal("0"), Decimal("0"), 0, main_module.utc_now()
             )
             runtime.last_reconcile_outcome = AccountReconcileOutcome.FRESH_MATCH
+            captured_at_ms = int(main_module.time.time() * 1000)
+            clock = main_module.SourceClock(captured_at_ms, captured_at_ms, 0)
+            runtime.last_market_frame = main_module.MarketFrame(
+                asset="BTC",
+                captured_at_ms=captured_at_ms,
+                variational_clock=clock,
+                lighter_clock=clock,
+                source_skew_ms=0,
+                var_bid=Decimal("100"),
+                var_ask=Decimal("100.1"),
+                lighter_reference_buy_vwap=Decimal("100.2"),
+                lighter_reference_sell_vwap=Decimal("100.3"),
+                lighter_actual_buy_vwap=Decimal("100.2"),
+                lighter_actual_sell_vwap=Decimal("100.3"),
+                reference_notional_usd=Decimal("500"),
+                actual_notional_usd=Decimal("500"),
+                reference_rates=main_module.DirectionalRates(
+                    Decimal("0.0007"), Decimal("0.0004")
+                ),
+                actual_rates=main_module.DirectionalRates(
+                    Decimal("0.0007"), Decimal("0.0004")
+                ),
+            )
+            runtime.active_parameter_epoch = main_module.build_parameter_candidate(
+                now_ms=captured_at_ms,
+                model=runtime.strategy_model,
+                config_hash=runtime.strategy_config_hash,
+                stats=runtime.strategy_model.calibration_stats,
+                reference_notional_usd=runtime.strategy_config.reference_notional_usd,
+                order_notional_usd=runtime.strategy_config.order_notional_usd,
+                reserve_bps_per_leg=runtime.strategy_config.provisional_reserve_bps_per_leg,
+                max_normal_round_wear_bps=runtime.strategy_config.max_normal_round_wear_bps,
+            )
             for minutes, ready in ((5, True), (30, False)):
                 for side, median in (
                     (main_module.StrategySide.BUY, Decimal("0.0005")),
@@ -148,6 +181,26 @@ class OperationsRuntimeTests(unittest.TestCase):
             self.assertEqual(snapshot["metrics"]["totalWear"], "5.0")
             self.assertEqual(snapshot["metrics"]["averageWear"], "0.5")
             self.assertEqual(snapshot["metrics"]["positiveRounds"], 10)
+            current_basis = snapshot["metrics"]["currentBasis"]
+            self.assertEqual(current_basis["referenceLongVar"], "0.0007")
+            self.assertEqual(current_basis["referenceShortVar"], "0.0004")
+            self.assertEqual(current_basis["actualLongVar"], "0.0007")
+            self.assertEqual(current_basis["actualShortVar"], "0.0004")
+            self.assertEqual(current_basis["referenceNotionalUsd"], "500")
+            self.assertEqual(current_basis["actualNotionalUsd"], "500")
+            self.assertEqual(current_basis["estimatedOpenLongUsd"], "0.3500")
+            self.assertEqual(current_basis["estimatedOpenShortUsd"], "0.2000")
+            epoch = runtime.active_parameter_epoch
+            assert epoch is not None
+            thresholds = snapshot["metrics"]["openThresholds"]
+            self.assertEqual(
+                Decimal(thresholds["longVar"]),
+                epoch.component(main_module.StrategySide.BUY).final
+                + runtime.effective_open_execution_headroom_bps(
+                    "BUY", runtime.strategy_config.order_notional_usd
+                )
+                / Decimal("10000"),
+            )
             medians = snapshot["metrics"]["basisMedians"]
             self.assertEqual(medians["5m"]["longVar"], "0.0005")
             self.assertEqual(medians["5m"]["shortVar"], "0.0006")
@@ -159,6 +212,7 @@ class OperationsRuntimeTests(unittest.TestCase):
             self.assertTrue(current_pnl["active"])
             self.assertEqual(current_pnl["open"], "0.1")
             self.assertEqual(current_pnl["closeEstimate"], "-0.07")
+            self.assertEqual(current_pnl["closeReserve"], "-0.01")
             self.assertEqual(
                 snapshot["recentRounds"][0]["direction"],
                 "多 Var / 空 Lighter",

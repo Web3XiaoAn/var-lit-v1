@@ -11248,6 +11248,24 @@ class VariationalToLighterRuntime:
             if current_open is not None and close_candidate is not None
             else None
         )
+        market_frame = self.last_market_frame
+        epoch = self.active_parameter_epoch
+        open_thresholds = {
+            key: decimal_to_str(
+                epoch.component(side).final
+                + self.effective_open_execution_headroom_bps(
+                    side.value,
+                    self.strategy_config.order_notional_usd,
+                )
+                / Decimal("10000")
+                if epoch is not None
+                else None
+            )
+            for side, key in (
+                (StrategySide.BUY, "longVar"),
+                (StrategySide.SELL, "shortVar"),
+            )
+        }
         account = self.last_account_snapshot
         var_position = account.var_position if account is not None else None
         lighter_position = account.lighter_position if account is not None else None
@@ -11357,11 +11375,49 @@ class VariationalToLighterRuntime:
                 "averageWear": decimal_to_str(average_round),
                 "positiveRounds": positive_rounds,
                 "negativeRounds": negative_rounds,
+                "currentBasis": {
+                    "referenceLongVar": decimal_to_str(
+                        market_frame.reference_rates.buy if market_frame else None
+                    ),
+                    "referenceShortVar": decimal_to_str(
+                        market_frame.reference_rates.sell if market_frame else None
+                    ),
+                    "actualLongVar": decimal_to_str(
+                        market_frame.actual_rates.buy if market_frame else None
+                    ),
+                    "actualShortVar": decimal_to_str(
+                        market_frame.actual_rates.sell if market_frame else None
+                    ),
+                    "referenceNotionalUsd": decimal_to_str(
+                        market_frame.reference_notional_usd if market_frame else None
+                    ),
+                    "actualNotionalUsd": decimal_to_str(
+                        market_frame.actual_notional_usd if market_frame else None
+                    ),
+                    "estimatedOpenLongUsd": decimal_to_str(
+                        market_frame.actual_notional_usd
+                        * market_frame.actual_rates.buy
+                        if market_frame
+                        else None
+                    ),
+                    "estimatedOpenShortUsd": decimal_to_str(
+                        market_frame.actual_notional_usd
+                        * market_frame.actual_rates.sell
+                        if market_frame
+                        else None
+                    ),
+                },
+                "openThresholds": open_thresholds,
                 "basisMedians": basis_medians,
                 "currentPositionPnl": {
                     "active": current_open is not None,
                     "open": decimal_to_str(current_open_pnl),
                     "closeEstimate": decimal_to_str(current_close_estimate),
+                    "closeReserve": decimal_to_str(
+                        -close_candidate.close_reserve_usd
+                        if current_open is not None and close_candidate is not None
+                        else None
+                    ),
                 },
             },
             "recentRounds": round_rows,
