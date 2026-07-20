@@ -233,8 +233,6 @@
     .basis-status.ready { color: var(--green); }
     .basis-values { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; }
     .basis-stack { display: grid; gap: 5px; font-size: 12px; }
-    .basis-row { display: grid; grid-template-columns: minmax(48px, auto) repeat(2, minmax(0, 1fr)); gap: 8px; }
-    .basis-row-label { color: var(--muted); white-space: nowrap; }
     .basis-value { white-space: nowrap; font-variant-numeric: tabular-nums; }
     .basis-side { margin-right: 5px; color: var(--muted); }
     .basis-side.long { color: var(--green); }
@@ -650,10 +648,7 @@
         </div>
         <div class="basis-window basis-live">
           <div class="basis-window-head"><span class="basis-period">实时基差</span><span class="basis-status" id="current-basis-status">等待行情</span></div>
-          <div class="basis-stack">
-            <div class="basis-row"><span class="basis-row-label" id="basis-reference-label">500U</span><span class="basis-value"><span class="basis-side long">多</span><strong id="basis-reference-long">—</strong></span><span class="basis-value"><span class="basis-side short">空</span><strong id="basis-reference-short">—</strong></span></div>
-            <div class="basis-row"><span class="basis-row-label" id="basis-actual-label">开仓额</span><span class="basis-value"><span class="basis-side long">多</span><strong id="basis-actual-long">—</strong></span><span class="basis-value"><span class="basis-side short">空</span><strong id="basis-actual-short">—</strong></span></div>
-          </div>
+          <div class="basis-values"><span class="basis-value"><span class="basis-side long">多 Var</span><strong id="basis-reference-long">—</strong></span><span class="basis-value"><span class="basis-side short">空 Var</span><strong id="basis-reference-short">—</strong></span></div>
         </div>
         <div class="basis-window basis-open-preview">
           <div class="basis-window-head"><span class="basis-period">预估开仓 PnL</span><span class="basis-status" id="open-preview-status">等待行情</span></div>
@@ -1086,17 +1081,14 @@
         const currentBasisReady = [
           currentBasis.referenceLongVar,
           currentBasis.referenceShortVar,
-          currentBasis.actualLongVar,
-          currentBasis.actualShortVar,
+          currentBasis.referenceNotionalUsd,
         ].every((value) => value != null);
-        setText('basis-reference-label', `${formatNotional(currentBasis.referenceNotionalUsd)}参考`);
-        setText('basis-actual-label', `${formatNotional(currentBasis.actualNotionalUsd)}开仓`);
         setText('basis-reference-long', formatRate(currentBasis.referenceLongVar));
         setText('basis-reference-short', formatRate(currentBasis.referenceShortVar));
-        setText('basis-actual-long', formatRate(currentBasis.actualLongVar));
-        setText('basis-actual-short', formatRate(currentBasis.actualShortVar));
-        setText('current-basis-status', currentBasisReady ? '实时' : '等待行情');
-        $('current-basis-status').classList.toggle('ready', currentBasisReady);
+        setText('current-basis-status', currentBasisReady
+          ? `${formatNotional(currentBasis.referenceNotionalUsd)}参考 · ${currentBasis.fresh ? '实时' : '最新已知'}`
+          : '等待行情');
+        $('current-basis-status').classList.toggle('ready', currentBasisReady && currentBasis.fresh);
         const openPreviewReady = currentBasis.estimatedOpenLongUsd != null
           && currentBasis.estimatedOpenShortUsd != null;
         for (const [id, value] of [
@@ -1106,14 +1098,18 @@
           setText(id, value == null ? '—' : formatSigned(value, 4, ' U'));
           setTone($(id), value == null ? '' : Number(value) >= 0 ? 'good' : 'bad');
         }
-        setText('open-preview-status', openPreviewReady ? `${formatNotional(currentBasis.actualNotionalUsd)}开仓额` : '等待行情');
-        $('open-preview-status').classList.toggle('ready', openPreviewReady);
+        setText('open-preview-status', openPreviewReady
+          ? (currentBasis.fresh ? '实时' : '最新已知')
+          : '等待行情');
+        $('open-preview-status').classList.toggle('ready', openPreviewReady && currentBasis.fresh);
         const openThresholds = metrics.openThresholds || {};
         const thresholdsReady = openThresholds.longVar != null && openThresholds.shortVar != null;
         setText('open-threshold-long', formatRate(openThresholds.longVar));
         setText('open-threshold-short', formatRate(openThresholds.shortVar));
-        setText('open-threshold-status', thresholdsReady ? '运行值' : '等待参数');
-        $('open-threshold-status').classList.toggle('ready', thresholdsReady);
+        setText('open-threshold-status', thresholdsReady
+          ? (openThresholds.fresh ? '运行值' : '最新已知')
+          : '等待参数');
+        $('open-threshold-status').classList.toggle('ready', thresholdsReady && openThresholds.fresh);
         for (const window of ['5m', '30m', '1h']) {
           const median = metrics.basisMedians?.[window] || {};
           const status = $(`median-${window}-status`);

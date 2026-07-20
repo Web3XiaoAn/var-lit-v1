@@ -129,16 +129,15 @@ class DemoRuntime:
                 "positiveRounds": positive,
                 "negativeRounds": len(self.rounds) - positive,
                 "currentBasis": {
+                    "fresh": True,
                     "referenceLongVar": "0.0006123",
                     "referenceShortVar": "-0.0007058",
-                    "actualLongVar": "0.0006049",
-                    "actualShortVar": "-0.0007097",
                     "referenceNotionalUsd": "500",
-                    "actualNotionalUsd": self.config["orderNotionalUsd"],
                     "estimatedOpenLongUsd": "0.30245",
                     "estimatedOpenShortUsd": "-0.35485",
                 },
                 "openThresholds": {
+                    "fresh": True,
                     "longVar": "0.0006379",
                     "shortVar": "-0.0006940",
                 },

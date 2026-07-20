@@ -182,17 +182,16 @@ class OperationsRuntimeTests(unittest.TestCase):
             self.assertEqual(snapshot["metrics"]["averageWear"], "0.5")
             self.assertEqual(snapshot["metrics"]["positiveRounds"], 10)
             current_basis = snapshot["metrics"]["currentBasis"]
+            self.assertTrue(current_basis["fresh"])
             self.assertEqual(current_basis["referenceLongVar"], "0.0007")
             self.assertEqual(current_basis["referenceShortVar"], "0.0004")
-            self.assertEqual(current_basis["actualLongVar"], "0.0007")
-            self.assertEqual(current_basis["actualShortVar"], "0.0004")
             self.assertEqual(current_basis["referenceNotionalUsd"], "500")
-            self.assertEqual(current_basis["actualNotionalUsd"], "500")
             self.assertEqual(current_basis["estimatedOpenLongUsd"], "0.3500")
             self.assertEqual(current_basis["estimatedOpenShortUsd"], "0.2000")
             epoch = runtime.active_parameter_epoch
             assert epoch is not None
             thresholds = snapshot["metrics"]["openThresholds"]
+            self.assertTrue(thresholds["fresh"])
             self.assertEqual(
                 Decimal(thresholds["longVar"]),
                 epoch.component(main_module.StrategySide.BUY).final
@@ -213,6 +212,26 @@ class OperationsRuntimeTests(unittest.TestCase):
             self.assertEqual(current_pnl["open"], "0.1")
             self.assertEqual(current_pnl["closeEstimate"], "-0.07")
             self.assertEqual(current_pnl["closeReserve"], "-0.01")
+            runtime.last_market_frame = None
+            runtime.active_parameter_epoch = None
+            cached_snapshot = await runtime.operations_dashboard_snapshot()
+            cached_basis = cached_snapshot["metrics"]["currentBasis"]
+            self.assertFalse(cached_basis["fresh"])
+            self.assertEqual(
+                cached_basis["referenceLongVar"],
+                current_basis["referenceLongVar"],
+            )
+            self.assertEqual(
+                cached_basis["estimatedOpenLongUsd"],
+                current_basis["estimatedOpenLongUsd"],
+            )
+            cached_thresholds = cached_snapshot["metrics"]["openThresholds"]
+            self.assertFalse(cached_thresholds["fresh"])
+            self.assertEqual(cached_thresholds["longVar"], thresholds["longVar"])
+            self.assertEqual(
+                cached_thresholds["shortVar"],
+                thresholds["shortVar"],
+            )
             self.assertEqual(
                 snapshot["recentRounds"][0]["direction"],
                 "多 Var / 空 Lighter",

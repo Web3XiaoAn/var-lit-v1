@@ -2156,6 +2156,7 @@ class VariationalToLighterRuntime:
         # live frame becomes unavailable.  The dashboard keeps the last valid
         # rates so a brief quote gap does not flash between values and dashes.
         self._dashboard_last_market_frame: MarketFrame | None = None
+        self._dashboard_last_open_thresholds: dict[str, str | None] | None = None
         self._strategy_frame_build_lock = asyncio.Lock()
         self._last_valid_strategy_frame_ms: int | None = None
         self._last_recorded_strategy_sample_ms: int | None = None
@@ -5675,6 +5676,7 @@ class VariationalToLighterRuntime:
         self.active_parameter_epoch = None
         self.last_market_frame = None
         self._dashboard_last_market_frame = None
+        self._dashboard_last_open_thresholds = None
         self._last_valid_strategy_frame_ms = None
         self._last_recorded_strategy_sample_ms = None
         self._strategy_parameter_block_reason = "strategy_windows_not_ready"
@@ -11248,9 +11250,12 @@ class VariationalToLighterRuntime:
             if current_open is not None and close_candidate is not None
             else None
         )
-        market_frame = self.last_market_frame
+        live_market_frame = self.last_market_frame
+        if live_market_frame is not None:
+            self._dashboard_last_market_frame = live_market_frame
+        market_frame = live_market_frame or self._dashboard_last_market_frame
         epoch = self.active_parameter_epoch
-        open_thresholds = {
+        live_open_thresholds = {
             key: decimal_to_str(
                 epoch.component(side).final
                 + self.effective_open_execution_headroom_bps(
@@ -11266,6 +11271,11 @@ class VariationalToLighterRuntime:
                 (StrategySide.SELL, "shortVar"),
             )
         }
+        if epoch is not None:
+            self._dashboard_last_open_thresholds = live_open_thresholds
+        open_thresholds = (
+            self._dashboard_last_open_thresholds or live_open_thresholds
+        )
         account = self.last_account_snapshot
         var_position = account.var_position if account is not None else None
         lighter_position = account.lighter_position if account is not None else None
@@ -11376,23 +11386,15 @@ class VariationalToLighterRuntime:
                 "positiveRounds": positive_rounds,
                 "negativeRounds": negative_rounds,
                 "currentBasis": {
+                    "fresh": live_market_frame is not None,
                     "referenceLongVar": decimal_to_str(
                         market_frame.reference_rates.buy if market_frame else None
                     ),
                     "referenceShortVar": decimal_to_str(
                         market_frame.reference_rates.sell if market_frame else None
                     ),
-                    "actualLongVar": decimal_to_str(
-                        market_frame.actual_rates.buy if market_frame else None
-                    ),
-                    "actualShortVar": decimal_to_str(
-                        market_frame.actual_rates.sell if market_frame else None
-                    ),
                     "referenceNotionalUsd": decimal_to_str(
                         market_frame.reference_notional_usd if market_frame else None
-                    ),
-                    "actualNotionalUsd": decimal_to_str(
-                        market_frame.actual_notional_usd if market_frame else None
                     ),
                     "estimatedOpenLongUsd": decimal_to_str(
                         market_frame.actual_notional_usd
@@ -11407,7 +11409,10 @@ class VariationalToLighterRuntime:
                         else None
                     ),
                 },
-                "openThresholds": open_thresholds,
+                "openThresholds": {
+                    **open_thresholds,
+                    "fresh": epoch is not None,
+                },
                 "basisMedians": basis_medians,
                 "currentPositionPnl": {
                     "active": current_open is not None,
