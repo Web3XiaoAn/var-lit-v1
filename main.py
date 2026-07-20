@@ -104,6 +104,9 @@ TRACE_FILE_NAME = "execution_trace.jsonl"
 STRATEGY_MARKET_SAMPLES_FILE_NAME = "strategy_market_samples.jsonl"
 STRATEGY_SAMPLE_SESSION_FILE_NAME = "current_strategy_sample_session.json"
 STRATEGY_MARKET_SAMPLE_VERSION = "adaptive-market-sample-v1"
+OPEN_SURVIVAL_OBSERVATION_VERSION = "open-survival-observation-v1"
+OPEN_SURVIVAL_HORIZONS_MS = (0, 100, 250, 450, 1_000)
+OPEN_SURVIVAL_DEPTH_BANDS_BPS = (1, 2, 5)
 ADAPTIVE_MODEL_FILE = Path(__file__).resolve().parent / "adaptive_strategy" / "models" / "adaptive-median-v6.json"
 RESEARCH_DATABASE_FILE = (
     Path(__file__).resolve().parent
@@ -547,6 +550,47 @@ def calculate_lighter_execution(
         if remaining <= 0:
             return quote_total / qty, price
     return None
+
+
+def lighter_depth_features(
+    order_book: dict[str, dict[Decimal, Decimal]],
+    best_bid: Decimal | None,
+    best_ask: Decimal | None,
+) -> dict[str, Any]:
+    """Return compact executable-depth features without retaining raw books."""
+
+    if best_bid is None or best_ask is None or best_bid <= 0 or best_ask <= 0:
+        return {}
+    mid = (best_bid + best_ask) / Decimal("2")
+    bands: dict[str, dict[str, Decimal]] = {}
+    for bps in OPEN_SURVIVAL_DEPTH_BANDS_BPS:
+        width = Decimal(bps) / Decimal("10000")
+        bid_floor = best_bid * (Decimal("1") - width)
+        ask_ceiling = best_ask * (Decimal("1") + width)
+        bid_usd = sum(
+            price * qty
+            for price, qty in order_book.get("bids", {}).items()
+            if price >= bid_floor and qty > 0
+        )
+        ask_usd = sum(
+            price * qty
+            for price, qty in order_book.get("asks", {}).items()
+            if price <= ask_ceiling and qty > 0
+        )
+        total = bid_usd + ask_usd
+        bands[str(bps)] = {
+            "bid_usd": bid_usd,
+            "ask_usd": ask_usd,
+            "imbalance": (
+                (bid_usd - ask_usd) / total if total > 0 else Decimal("0")
+            ),
+        }
+    return {
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "spread_bps": (best_ask - best_bid) / mid * Decimal("10000"),
+        "bands_bps": bands,
+    }
 
 
 def calculate_lighter_execution_ticks(
@@ -2179,6 +2223,9 @@ class VariationalToLighterRuntime:
         self._strategy_history_resume_coverage_ms = 0
         self._strategy_history_resume_gap_ms: int | None = None
         self.strategy_sample_task: asyncio.Task[None] | None = None
+        self.open_survival_session_id = f"survival-{uuid.uuid4().hex}"
+        self._last_open_survival_key: tuple[Any, ...] | None = None
+        self.open_survival_tasks: set[asyncio.Task[None]] = set()
         self.execution_loss_samples: defaultdict[
             tuple[str, str], deque[Decimal]
         ] = defaultdict(lambda: deque(maxlen=EXECUTION_SAMPLE_LIMIT_PER_BUCKET))
@@ -6858,6 +6905,210 @@ class VariationalToLighterRuntime:
         )
         return frame, observation
 
+    def _open_survival_windows(self) -> dict[str, Any]:
+        return {
+            side.value: {
+                str(minutes): {
+                    "median": window.median,
+                    "q80": window.q80,
+                    "mad": window.mad,
+                    "sample_count": window.sample_count,
+                    "ready": window.ready,
+                }
+                for minutes, window in self.strategy_window_stats.get(side, {}).items()
+                if minutes in {5, 30, 60}
+            }
+            for side in StrategySide
+        }
+
+    async def _open_survival_lighter_snapshot(
+        self,
+        *,
+        frame: MarketFrame,
+        thresholds: dict[StrategySide, Decimal | None],
+        target_offset_ms: int,
+        started: float,
+    ) -> dict[str, Any]:
+        async with self.lighter_order_book_lock:
+            received_at = self.lighter_book_received_monotonic
+            if (
+                not self.lighter_order_book_ready
+                or self.lighter_order_book_sequence_gap
+                or self.lighter_order_book_nonce is None
+                or received_at is None
+            ):
+                return {
+                    "target_offset_ms": target_offset_ms,
+                    "actual_offset_ms": int((time.monotonic() - started) * 1_000),
+                    "available": False,
+                }
+            buy_execution = self._lighter_execution_from_book_locked(
+                lighter_side="SELL",
+                qty=frame.actual_notional_usd / frame.var_ask,
+            )
+            sell_execution = self._lighter_execution_from_book_locked(
+                lighter_side="BUY",
+                qty=frame.actual_notional_usd / frame.var_bid,
+            )
+            nonce = self.lighter_order_book_nonce
+            age_ms = max(0, int((time.monotonic() - received_at) * 1_000))
+            depth = lighter_depth_features(
+                self.lighter_order_book,
+                self.lighter_best_bid,
+                self.lighter_best_ask,
+            )
+        actual_offset_ms = int((time.monotonic() - started) * 1_000)
+        if buy_execution is None or sell_execution is None:
+            return {
+                "target_offset_ms": target_offset_ms,
+                "actual_offset_ms": actual_offset_ms,
+                "available": False,
+                "lighter_book_nonce": nonce,
+                "lighter_age_ms": age_ms,
+                "depth": depth,
+            }
+        buy_rate = (buy_execution[0] - frame.var_ask) / frame.var_ask
+        sell_rate = (frame.var_bid - sell_execution[0]) / frame.var_bid
+        return {
+            "target_offset_ms": target_offset_ms,
+            "actual_offset_ms": actual_offset_ms,
+            "available": True,
+            "lighter_book_nonce": nonce,
+            "lighter_age_ms": age_ms,
+            "buy_lighter_sell_vwap": buy_execution[0],
+            "sell_lighter_buy_vwap": sell_execution[0],
+            "buy_rate_frozen_var": buy_rate,
+            "sell_rate_frozen_var": sell_rate,
+            "buy_margin": (
+                buy_rate - thresholds[StrategySide.BUY]
+                if thresholds[StrategySide.BUY] is not None
+                else None
+            ),
+            "sell_margin": (
+                sell_rate - thresholds[StrategySide.SELL]
+                if thresholds[StrategySide.SELL] is not None
+                else None
+            ),
+            "depth": depth,
+        }
+
+    async def _record_open_survival_observation(
+        self,
+        *,
+        frame: MarketFrame,
+        observation: dict[str, Any],
+        epoch: ParameterEpoch | None,
+        windows: dict[str, Any],
+        started: float,
+    ) -> None:
+        thresholds = {
+            side: epoch.component(side).final if epoch is not None else None
+            for side in StrategySide
+        }
+        snapshots: list[dict[str, Any]] = []
+        for target_ms in OPEN_SURVIVAL_HORIZONS_MS:
+            delay = target_ms / 1_000 - (time.monotonic() - started)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            snapshots.append(
+                await self._open_survival_lighter_snapshot(
+                    frame=frame,
+                    thresholds=thresholds,
+                    target_offset_ms=target_ms,
+                    started=started,
+                )
+            )
+        self.trace_event(
+            OPEN_SURVIVAL_OBSERVATION_VERSION,
+            None,
+            schema=OPEN_SURVIVAL_OBSERVATION_VERSION,
+            session_id=self.open_survival_session_id,
+            mode=self.strategy_config.execution_mode,
+            sample_timestamp_ms=frame.captured_at_ms,
+            asset=frame.asset,
+            market_generation=self.market_generation,
+            epoch_id=epoch.epoch_id if epoch is not None else None,
+            model_version=epoch.model_version if epoch is not None else None,
+            var_bid=frame.var_bid,
+            var_ask=frame.var_ask,
+            var_source_timestamp_ms=frame.variational_clock.source_timestamp_ms,
+            var_age_ms=observation.get("var_age_ms"),
+            lighter_age_ms=observation.get("lighter_age_ms"),
+            source_skew_ms=observation.get("source_skew_ms"),
+            reference_rates={
+                side.value: frame.reference_rates.for_side(side)
+                for side in StrategySide
+            },
+            actual_rates={
+                side.value: frame.actual_rates.for_side(side)
+                for side in StrategySide
+            },
+            thresholds={side.value: thresholds[side] for side in StrategySide},
+            margins={
+                side.value: (
+                    min(
+                        frame.reference_rates.for_side(side),
+                        frame.actual_rates.for_side(side),
+                    )
+                    - thresholds[side]
+                    if thresholds[side] is not None
+                    else None
+                )
+                for side in StrategySide
+            },
+            five_second_ranges={
+                side.value: self.recent_directional_rate_range(
+                    side,
+                    now_ms=frame.captured_at_ms,
+                    current_rate=frame.reference_rates.for_side(side),
+                )
+                for side in StrategySide
+            },
+            windows=windows,
+            snapshots=snapshots,
+        )
+
+    def schedule_open_survival_observation(
+        self,
+        frame: MarketFrame,
+        observation: dict[str, Any],
+    ) -> bool:
+        """Queue one non-trading observation per fresh Variational quote."""
+
+        if self.trace_writer is None or not observation.get("valid"):
+            return False
+        key = (
+            self.market_generation,
+            frame.variational_clock.source_timestamp_ms,
+            frame.var_bid,
+            frame.var_ask,
+        )
+        if key == self._last_open_survival_key:
+            return False
+        self._last_open_survival_key = key
+        started = time.monotonic()
+        task = asyncio.create_task(
+            self._record_open_survival_observation(
+                frame=frame,
+                observation=dict(observation),
+                epoch=self.active_parameter_epoch,
+                windows=self._open_survival_windows(),
+                started=started,
+            ),
+            name="open-survival-observation",
+        )
+        self.open_survival_tasks.add(task)
+        task.add_done_callback(self._open_survival_observation_done)
+        return True
+
+    def _open_survival_observation_done(self, task: asyncio.Task[None]) -> None:
+        self.open_survival_tasks.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            self.logger.warning("Open survival observation failed: %s", error)
+
     def _invalidate_adaptive_parameters(self, reason: str) -> None:
         """Fail new opens closed and discard every unconfirmed proposal."""
 
@@ -6991,6 +7242,8 @@ class VariationalToLighterRuntime:
                         "runtime_build": RUNTIME_BUILD,
                     }
                 )
+            if record_sample:
+                self.schedule_open_survival_observation(frame, observation)
             if not record_sample:
                 return True
             if sample_clock_regression:
@@ -12938,6 +13191,12 @@ class VariationalToLighterRuntime:
         if self.strategy_sample_task and not self.strategy_sample_task.done():
             self.strategy_sample_task.cancel()
             await asyncio.gather(self.strategy_sample_task, return_exceptions=True)
+
+        if self.open_survival_tasks:
+            for task in self.open_survival_tasks:
+                task.cancel()
+            await asyncio.gather(*self.open_survival_tasks, return_exceptions=True)
+            self.open_survival_tasks.clear()
 
         if self.reconcile_task and not self.reconcile_task.done():
             self.reconcile_task.cancel()
