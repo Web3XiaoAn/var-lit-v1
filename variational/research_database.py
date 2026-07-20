@@ -112,6 +112,56 @@ def _leg_pnl(payload: dict[str, Any]) -> Decimal | None:
     return (var_price - lighter_price) * matched_qty
 
 
+def _actual_lighter_fill(payload: dict[str, Any]) -> tuple[Decimal, Decimal]:
+    qty = _decimal(payload.get("qty")) or Decimal("0")
+    price = _decimal(payload.get("lighter_filled_price"))
+    if price is None:
+        return Decimal("0"), Decimal("0")
+    filled_qty = min(qty, _decimal(payload.get("lighter_filled_qty")) or qty)
+    filled_quote = _decimal(payload.get("lighter_filled_quote"))
+    return filled_qty, filled_quote if filled_quote is not None else price * filled_qty
+
+
+def _actual_round_pnl(
+    open_payload: dict[str, Any],
+    close_payload: dict[str, Any],
+) -> Decimal | None:
+    side = str(open_payload.get("side") or "").strip().lower()
+    qty = _decimal(open_payload.get("qty"))
+    open_var = _decimal(open_payload.get("variational_filled_price"))
+    close_var = _decimal(close_payload.get("variational_filled_price"))
+    if (
+        side not in {"buy", "sell"}
+        or qty is None
+        or open_var is None
+        or close_var is None
+    ):
+        return None
+    open_lighter_qty, open_lighter_quote = _actual_lighter_fill(open_payload)
+    close_lighter_qty, close_lighter_quote = _actual_lighter_fill(close_payload)
+    if open_lighter_qty != close_lighter_qty:
+        return None
+    if side == "buy":
+        return (
+            (close_var - open_var) * qty
+            + open_lighter_quote
+            - close_lighter_quote
+        )
+    return (
+        (open_var - close_var) * qty
+        + close_lighter_quote
+        - open_lighter_quote
+    )
+
+
+def _has_var_fill(payload: dict[str, Any]) -> bool:
+    return bool(
+        str(payload.get("side") or "").strip().lower() in {"buy", "sell"}
+        and _decimal(payload.get("qty")) is not None
+        and _decimal(payload.get("variational_filled_price")) is not None
+    )
+
+
 def _execution_loss(payload: dict[str, Any]) -> Decimal | None:
     """Return loss from the latest final fills, falling back to stored data."""
 
@@ -592,14 +642,10 @@ class ResearchDatabase:
                 FROM research_events
                 WHERE stream = 'order_metric'
                   AND json_extract(payload_json, '$.strategy_phase')
-                      IN ('open', 'close')
+                      IN ('open', 'close', 'emergency_close')
                   AND json_extract(
                           payload_json,
                           '$.variational_filled_price'
-                      ) IS NOT NULL
-                  AND json_extract(
-                          payload_json,
-                          '$.lighter_filled_price'
                       ) IS NOT NULL
                 ORDER BY event_time_ms, id
                 """
@@ -617,10 +663,10 @@ class ResearchDatabase:
                     continue
                 # A Lighter fill can be logged before the authoritative Var
                 # fill/recovery arrives. Keep following every lifecycle state
-                # and retain the latest snapshot that has both final leg
-                # prices; a later correction then replaces the provisional
-                # round on the next derived refresh.
-                if _leg_pnl(payload) is None:
+                # and retain the latest snapshot with a final Var fill. A
+                # protective recovery may intentionally have no Lighter fill;
+                # a later lifecycle correction replaces the provisional row.
+                if not _has_var_fill(payload):
                     continue
                 source_event_ms = int(event_time_ms)
                 completed_at_ms = _fill_completed_at_ms(
@@ -781,11 +827,19 @@ class ResearchDatabase:
             else None
         )
         open_pnl = _leg_pnl(open_payload)
-        close_pnl = _leg_pnl(close_payload)
-        round_pnl = (
-            open_pnl + close_pnl
-            if open_pnl is not None and close_pnl is not None
-            else None
+        round_pnl = _actual_round_pnl(open_payload, close_payload)
+        if round_pnl is not None:
+            open_pnl = open_pnl or Decimal("0")
+            close_pnl = round_pnl - open_pnl
+        else:
+            close_pnl = _leg_pnl(close_payload)
+        open_lighter_qty, _open_lighter_quote = _actual_lighter_fill(open_payload)
+        close_lighter_qty, _close_lighter_quote = _actual_lighter_fill(close_payload)
+        recovery = bool(
+            str(close_payload.get("strategy_phase") or "").lower()
+            == "emergency_close"
+            or open_lighter_qty != qty
+            or close_lighter_qty != qty
         )
         open_loss = _execution_loss(open_payload) or Decimal("0")
         close_loss = _execution_loss(close_payload) or Decimal("0")
@@ -820,6 +874,7 @@ class ResearchDatabase:
                 if open_side == "buy"
                 else "short_var_long_lighter"
             ),
+            "round_class": "protective_recovery" if recovery else "strategy",
             "quantity": _decimal_text(qty),
             "open_notional_usd": _decimal_text(open_notional),
             "open_leg_pnl_usd": _decimal_text(open_pnl),

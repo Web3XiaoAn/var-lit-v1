@@ -775,6 +775,12 @@ class AdaptiveRuntimeTests(unittest.TestCase):
                 return actual, reference, 0
 
             runtime.get_fresh_lighter_open_vwaps = fresh_open_vwaps
+
+            async def fresh_marginal(**_kwargs):
+                actual, _reference, _age = await fresh_open_vwaps()
+                return actual, actual, 1, 0
+
+            runtime.get_lighter_execution_snapshot = fresh_marginal
             result = await runtime.request_guarded_var_order(
                 phase="open",
                 side="BUY",
@@ -786,6 +792,62 @@ class AdaptiveRuntimeTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(len(runtime.runtime.command_broker.calls), 2)
             self.assertIsNotNone(runtime.pending_var_intent)
+
+        asyncio.run(run_case())
+
+    def test_latest_marginal_depth_rejects_before_var_commit(self) -> None:
+        async def run_case() -> None:
+            class Broker:
+                def __init__(self) -> None:
+                    self.calls: list[dict] = []
+
+                async def request_place_order(self, **kwargs):
+                    self.calls.append(kwargs)
+                    return {
+                        "type": "ORDER_RESULT",
+                        "requestId": "quote",
+                        "ok": True,
+                        "detail": {
+                            "quote": {
+                                "quoteId": "marginal-regressed",
+                                "firmPrice": "100",
+                                "firmQty": "2",
+                            }
+                        },
+                    }
+
+            runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
+            runtime.variational_ticker = "BTC"
+            runtime.runtime.command_broker = Broker()
+            candidate = make_open_candidate(runtime)
+
+            async def fresh_open_vwaps(**_kwargs):
+                actual = Decimal("100") * (
+                    Decimal("1") + candidate.threshold + Decimal("0.001")
+                )
+                reference = Decimal("100") * (
+                    Decimal("1") + candidate.threshold + Decimal("0.00005")
+                )
+                return actual, reference, 0
+
+            async def regressed_marginal(**_kwargs):
+                return Decimal("100.2"), Decimal("99"), 2, 0
+
+            runtime.get_fresh_lighter_open_vwaps = fresh_open_vwaps
+            runtime.get_lighter_execution_snapshot = regressed_marginal
+
+            result = await runtime.request_guarded_var_order(
+                phase="open",
+                side="BUY",
+                amount=Decimal("200"),
+                base_qty=None,
+                open_candidate=candidate,
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertIn("marginal price", result["error"])
+            self.assertEqual(len(runtime.runtime.command_broker.calls), 1)
+            self.assertIsNone(runtime.pending_var_intent)
 
         asyncio.run(run_case())
 

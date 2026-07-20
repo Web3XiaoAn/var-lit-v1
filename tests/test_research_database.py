@@ -260,6 +260,60 @@ class ResearchDatabaseTests(unittest.TestCase):
                 ).fetchone()
             self.assertEqual(trade_label, ("bad_execution", "manual_user"))
 
+    def test_protective_recovery_persists_actual_full_round_pnl(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="research-recovery-") as tmp:
+            root = Path(tmp)
+            metrics = root / "order_metrics.jsonl"
+            rows = [
+                {
+                    "event": "lighter_error",
+                    "logged_at": "2026-01-01T00:00:00+00:00",
+                    "strategy_phase": "open",
+                    "side": "sell",
+                    "qty": "0.00778",
+                    "trade_key": "open-no-hedge",
+                    "asset": "BTC",
+                    "strategy_tag": "adaptive-median-v6",
+                    "variational_filled_price": "65266.92",
+                    "hedge_status": "error",
+                },
+                {
+                    "event": "lighter_skip",
+                    "logged_at": "2026-01-01T00:00:01+00:00",
+                    "strategy_phase": "emergency_close",
+                    "side": "buy",
+                    "qty": "0.00778",
+                    "trade_key": "close-no-hedge",
+                    "asset": "BTC",
+                    "strategy_tag": "adaptive-median-v6",
+                    "variational_filled_price": "65271.92",
+                    "hedge_status": "skipped",
+                },
+            ]
+            metrics.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            database = ResearchDatabase(root / "research.sqlite3")
+            synchronizer = ResearchDatabaseSynchronizer(
+                database,
+                [SyncSource(metrics, stream="order_metric")],
+            )
+
+            synchronizer.sync_once()
+
+            with database._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT open_leg_pnl_usd, close_leg_pnl_usd,
+                           round_pnl_usd, payload_json
+                    FROM research_rounds
+                    """
+                ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row[:3], ("0", "-0.0389000", "-0.0389000"))
+            self.assertEqual(json.loads(row[3])["round_class"], "protective_recovery")
+
     def test_late_var_fill_replaces_provisional_close_loss(self) -> None:
         with tempfile.TemporaryDirectory(prefix="research-round-late-fill-") as tmp:
             root = Path(tmp)

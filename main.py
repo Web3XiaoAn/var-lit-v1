@@ -1796,6 +1796,7 @@ class TradeRound:
     open_result: LegResult
     close_result: LegResult
     round_pnl: Decimal | None
+    recovery: bool
 
 
 def _pnl_from_diff(qty: Decimal, diff: Decimal | None) -> Decimal | None:
@@ -1825,6 +1826,58 @@ def leg_result_by_direction(record: OrderLifecycle) -> LegResult:
     return LegResult(price_diff=diff, pct=pct, pnl=_pnl_from_diff(matched_qty, diff))
 
 
+def actual_lighter_fill_qty(record: OrderLifecycle) -> Decimal:
+    """Return confirmed Lighter quantity, including legacy complete records."""
+
+    if record.lighter_fill_price is None:
+        return Decimal("0")
+    filled_qty = record.lighter_filled_qty
+    return min(record.qty, record.qty if filled_qty is None else filled_qty)
+
+
+def actual_round_pnl(
+    open_record: OrderLifecycle,
+    close_record: OrderLifecycle,
+) -> Decimal | None:
+    """Calculate all realized Var and Lighter cash flows for a flat round."""
+
+    open_var = open_record.var_fill_price
+    close_var = close_record.var_fill_price
+    if open_var is None or close_var is None:
+        return None
+    open_lighter_qty = actual_lighter_fill_qty(open_record)
+    close_lighter_qty = actual_lighter_fill_qty(close_record)
+    if (
+        open_lighter_qty != close_lighter_qty
+        or lighter_order_may_still_fill(open_record)
+        or lighter_order_may_still_fill(close_record)
+    ):
+        return None
+
+    open_lighter_quote = (
+        open_record.lighter_filled_quote
+        if open_record.lighter_filled_quote is not None
+        else (open_record.lighter_fill_price or Decimal("0")) * open_lighter_qty
+    )
+    close_lighter_quote = (
+        close_record.lighter_filled_quote
+        if close_record.lighter_filled_quote is not None
+        else (close_record.lighter_fill_price or Decimal("0")) * close_lighter_qty
+    )
+    qty = open_record.qty
+    if open_record.side.strip().lower() == "buy":
+        return (
+            (close_var - open_var) * qty
+            + open_lighter_quote
+            - close_lighter_quote
+        )
+    return (
+        (open_var - close_var) * qty
+        + close_lighter_quote
+        - open_lighter_quote
+    )
+
+
 def _can_close_round(open_record: OrderLifecycle, close_record: OrderLifecycle) -> bool:
     open_side = open_record.side.strip().lower()
     close_side = close_record.side.strip().lower()
@@ -1851,9 +1904,21 @@ def build_trade_rounds(records: list[OrderLifecycle]) -> tuple[OrderLifecycle | 
         if _can_close_round(current_open, record):
             open_result = leg_result_by_direction(current_open)
             close_result = leg_result_by_direction(record)
-            round_pnl = None
-            if open_result.pnl is not None and close_result.pnl is not None:
-                round_pnl = open_result.pnl + close_result.pnl
+            round_pnl = actual_round_pnl(current_open, record)
+            if round_pnl is not None:
+                open_pnl = open_result.pnl or Decimal("0")
+                open_result = LegResult(
+                    price_diff=open_result.price_diff,
+                    pct=open_result.pct,
+                    pnl=open_pnl,
+                )
+                close_result = LegResult(
+                    price_diff=close_result.price_diff,
+                    pct=close_result.pct,
+                    pnl=round_pnl - open_pnl,
+                )
+            open_lighter_qty = actual_lighter_fill_qty(current_open)
+            close_lighter_qty = actual_lighter_fill_qty(record)
             history.append(
                 TradeRound(
                     open_record=current_open,
@@ -1861,6 +1926,11 @@ def build_trade_rounds(records: list[OrderLifecycle]) -> tuple[OrderLifecycle | 
                     open_result=open_result,
                     close_result=close_result,
                     round_pnl=round_pnl,
+                    recovery=(
+                        record.strategy_phase == "emergency_close"
+                        or open_lighter_qty != current_open.qty
+                        or close_lighter_qty != record.qty
+                    ),
                 )
             )
             current_open = None
@@ -9858,6 +9928,57 @@ class VariationalToLighterRuntime:
                 "trace_id": trace_id,
             }
 
+        if open_candidate is not None:
+            lighter_side = "SELL" if side.strip().upper() == "BUY" else "BUY"
+            (
+                _latest_vwap,
+                latest_marginal,
+                latest_nonce,
+                latest_age_ms,
+            ) = await self.get_lighter_execution_snapshot(
+                lighter_side=lighter_side,
+                qty=firm_qty,
+            )
+            economic_limit = lighter_economic_limit_price(
+                var_side=side,
+                firm_price=firm_price,
+                firm_qty=firm_qty,
+                required_pnl=decision.required_pnl,
+            )
+            marginal_allowed = bool(
+                latest_marginal is not None
+                and economic_limit is not None
+                and latest_age_ms is not None
+                and latest_age_ms <= config.max_quote_age_ms
+                and (
+                    latest_marginal >= economic_limit
+                    if lighter_side == "SELL"
+                    else latest_marginal <= economic_limit
+                )
+            )
+            self.trace_event(
+                "open_precommit_depth_guard",
+                trace_id,
+                allowed=marginal_allowed,
+                lighter_side=lighter_side,
+                marginal_price=latest_marginal,
+                economic_limit=economic_limit,
+                quote_age_ms=latest_age_ms,
+                order_book_nonce=latest_nonce,
+            )
+            if not marginal_allowed:
+                return {
+                    "type": "ORDER_RESULT",
+                    "requestId": quote_result.get("requestId"),
+                    "ok": False,
+                    "error": (
+                        "fresh firm quote rejected: latest Lighter marginal "
+                        "price no longer preserves opening economics"
+                    ),
+                    "detail": {**quote_result_detail, "quote": guarded_quote},
+                    "trace_id": trace_id,
+                }
+
         prepared_intent = await self.prepare_pending_var_intent(
             phase=phase,
             side=side,
@@ -11473,7 +11594,7 @@ class VariationalToLighterRuntime:
                         filled_record.hedge_error = reason
                         payload = filled_record.to_payload()
                     await self.append_order_log("lighter_protective_close", payload)
-                    self.pause_automation(reason)
+                    self.pause_for_reconciliation(reason)
                     self.schedule_lighter_order(filled_record)
                     await self.persist_runtime_state()
                     return
@@ -11497,7 +11618,7 @@ class VariationalToLighterRuntime:
                     filled_record.hedge_error = reason
                     payload = filled_record.to_payload()
                 await self.append_order_log("lighter_skip", payload)
-                self.pause_automation(reason)
+                self.pause_for_reconciliation(reason)
                 await self.persist_runtime_state()
                 return
             self.schedule_lighter_order(filled_record)
@@ -12102,6 +12223,7 @@ class VariationalToLighterRuntime:
                     "openWear": decimal_to_str(open_pnl),
                     "closeWear": decimal_to_str(close_pnl),
                     "roundWear": decimal_to_str(round_pnl),
+                    "recovery": trade_round.recovery,
                     "withinLimit": bool(
                         round_pnl is not None and round_pnl >= -normal_wear_usd
                     ),

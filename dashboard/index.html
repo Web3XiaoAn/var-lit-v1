@@ -1204,7 +1204,10 @@
           for (const round of sorted) {
             const row = create('tr');
             const long = round.directionKey === 'long_var';
-            const result = Number(round.roundWear) >= 0 ? '正常盈利' : (round.withinLimit ? '可接受' : '突破下限');
+            const hasWear = round.roundWear !== null && round.roundWear !== undefined && round.roundWear !== '';
+            const profitable = hasWear && Number(round.roundWear) >= 0;
+            const outcome = !hasWear ? '待确认' : (profitable ? '正常盈利' : (round.withinLimit ? '可接受' : '突破下限'));
+            const result = round.recovery && hasWear ? `保护回退·${outcome}` : outcome;
             row.innerHTML = '<td></td><td></td><td></td><td></td><td></td><td></td>';
             row.children[0].textContent = round.number ?? '-';
             const direction = create('span', `direction ${long ? 'long' : 'short'}`, round.direction || '-');
@@ -1212,7 +1215,7 @@
             row.children[2].textContent = formatSigned(round.openWear, 6);
             row.children[3].textContent = formatSigned(round.closeWear, 6);
             row.children[4].textContent = formatSigned(round.roundWear, 6);
-            const pill = create('span', `result-pill ${Number(round.roundWear) >= 0 ? 'good' : (round.withinLimit ? '' : 'bad')}`, result);
+            const pill = create('span', `result-pill ${profitable ? 'good' : (hasWear && !round.withinLimit ? 'bad' : '')}`, result);
             row.children[5].appendChild(pill);
             body.appendChild(row);
           }

@@ -369,6 +369,11 @@ class TelemetryTests(unittest.TestCase):
             runtime.trace_event = trace_event
             runtime.get_fresh_lighter_open_vwaps = fresh_open_vwaps
 
+            async def fresh_marginal(**_kwargs):
+                return Decimal("100.103"), Decimal("100.103"), 1, 12
+
+            runtime.get_lighter_execution_snapshot = fresh_marginal
+
             async def no_persist() -> None:
                 return None
 
@@ -392,6 +397,7 @@ class TelemetryTests(unittest.TestCase):
                     "variational_quote_dispatch",
                     "variational_quote_result",
                     "firm_quote_guard",
+                    "open_precommit_depth_guard",
                     "execution_intent_prepared",
                     "execution_intent_committing",
                     "variational_commit_dispatch",

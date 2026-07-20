@@ -204,6 +204,70 @@ class DashboardCalculationTests(unittest.TestCase):
             Decimal("-0.145213"),
         )
 
+    def test_protective_var_only_recovery_reports_actual_round_pnl(self) -> None:
+        open_record = OrderLifecycle(
+            trade_key="open-no-hedge",
+            trade_id="open-no-hedge",
+            side="sell",
+            qty=Decimal("0.00778"),
+            asset="BTC",
+            auto_hedge_enabled=True,
+            last_variational_status="filled",
+            var_fill_price=Decimal("65266.92"),
+            strategy_phase="open",
+            hedge_status="error",
+        )
+        close_record = OrderLifecycle(
+            trade_key="emergency-close",
+            trade_id="emergency-close",
+            side="buy",
+            qty=Decimal("0.00778"),
+            asset="BTC",
+            auto_hedge_enabled=True,
+            last_variational_status="filled",
+            var_fill_price=Decimal("65271.92"),
+            strategy_phase="emergency_close",
+            hedge_status="skipped",
+        )
+
+        current_open, history = build_trade_rounds([open_record, close_record])
+
+        self.assertIsNone(current_open)
+        self.assertEqual(len(history), 1)
+        self.assertTrue(history[0].recovery)
+        self.assertEqual(history[0].open_result.pnl, Decimal("0"))
+        self.assertEqual(history[0].close_result.pnl, Decimal("-0.0389000"))
+        self.assertEqual(history[0].round_pnl, Decimal("-0.0389000"))
+
+    def test_partial_lighter_recovery_includes_unhedged_var_quantity(self) -> None:
+        open_record = make_record(
+            "partial-open",
+            "sell",
+            "0.00778",
+            "65294.8",
+            "65329.7",
+        )
+        open_record.strategy_phase = "open"
+        open_record.hedge_status = "error"
+        open_record.lighter_filled_qty = Decimal("0.001")
+        close_record = make_record(
+            "partial-recovery",
+            "buy",
+            "0.00778",
+            "65299.51",
+            "65332.0",
+        )
+        close_record.strategy_phase = "emergency_close"
+        close_record.hedge_status = "filled"
+        close_record.lighter_filled_qty = Decimal("0.001")
+
+        _current_open, history = build_trade_rounds([open_record, close_record])
+
+        self.assertEqual(history[0].open_result.pnl, Decimal("-0.0349"))
+        self.assertEqual(history[0].close_result.pnl, Decimal("0.0005562"))
+        self.assertEqual(history[0].round_pnl, Decimal("-0.0343438"))
+        self.assertTrue(history[0].recovery)
+
     def test_mismatched_partial_close_is_not_reinterpreted_as_reverse_open(self) -> None:
         open_record = make_record("open", "buy", "0.005", "1000", "1001")
         partial_close = make_record("partial-close", "sell", "0.002", "1002", "1003")
@@ -1594,6 +1658,10 @@ class DashboardCalculationTests(unittest.TestCase):
             self.assertEqual(close_record.hedge_status, "skipped")
             self.assertIn("matching open Lighter hedge", close_record.hedge_error or "")
             self.assertTrue(runtime.automation_paused)
+            self.assertEqual(
+                runtime._reconcile_pause_reason,
+                runtime.automation_pause_reason,
+            )
 
         asyncio.run(run_case())
 
