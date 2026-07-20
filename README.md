@@ -20,6 +20,7 @@ Var-Lit V1 是 Variational 与 Lighter 之间的 BTC 双边执行程序。这是
 - `observe` 只观察模式与 `live` 连续实盘模式。
 - 本地 Chrome 扩展、三通道健康探针、执行延迟分析和资源采样工具。
 - Ubuntu 24.04、普通 Chrome + Xvfb + 轻量 Openbox、systemd 的服务器部署模板。
+- 仅监听回环地址、通过 SSH 隧道访问的 200ms 实时网页运维面板。
 - 可选 SQLite 研究库；服务器默认关闭，只保留约一小时的滚动运行数据。
 
 内部策略状态标识仍为 `adaptive-median-v5`。它是已有实盘状态和模型文件的兼容标识，
@@ -31,6 +32,7 @@ Var-Lit V1 是 Variational 与 Lighter 之间的 BTC 双边执行程序。这是
 - `main.py`、`execution_reserve.py`：运行入口、风控和执行预留。
 - `adaptive_strategy/`：纯策略计算、模型与不可变决策对象。
 - `variational/`：浏览器本地通道、Lighter 下单、遥测与研究库接口。
+- `dashboard/`：服务器回环地址上的实时运维面板静态资源。
 - `chrome_extension/`：Var-Lit V1 Chrome Bridge。
 - `deploy/`：Ubuntu、Xvfb、Openbox、Chrome 与 systemd 部署文件。
 - `tools/`：只读探针、性能分析、资源采样和研究数据工具。
@@ -131,7 +133,28 @@ venv/bin/python main.py --lang zh --no-dashboard
 看板中的 `Lighter 下单通道` 必须为 `WS READY`；`REST FALLBACK` 只允许平仓、恢复和
 手动成交对冲，不允许策略新开仓。
 
-### 6. 人工启用 live
+### 6. 从本机查看服务器网页面板
+
+Runtime 启动后，网页面板只监听运行机器的 `127.0.0.1:8780`，不会开放公网端口。在本机
+新终端建立 SSH 本地转发：
+
+```bash
+ssh -N -L 18780:127.0.0.1:8780 var-lit
+```
+
+然后在本机浏览器打开 `http://127.0.0.1:18780`。页面通过 WebSocket 每 200ms 读取同一个
+Runtime 的权威状态；关闭 SSH 命令后，本机页面就无法再访问。危险操作必须先展开权威
+仓位与活动委托预览，再在 60 秒内二次确认；状态在确认前发生变化会被拒绝。
+
+无需连接账户即可检查页面布局与按钮交互：
+
+```bash
+venv/bin/python tools/demo_operations_dashboard.py
+```
+
+演示进程只使用内存模拟数据，不加载 `.env`、Chrome、交易所客户端或订单通道。
+
+### 7. 人工启用 live
 
 停止程序，把 `.env` 中 `STRATEGY_EXECUTION_MODE` 改为 `live`，再重新启动。修改模式是
 单独的人工批准点；程序不会自动把 `observe` 升级为 `live`。

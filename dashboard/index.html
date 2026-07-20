@@ -1,0 +1,1113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="var-lit-csrf" content="__VAR_LIT_CSRF__">
+  <title>Var-Lit V5 自动化监控台</title>
+  <style nonce="__VAR_LIT_CSP_NONCE__">
+    :root {
+      color-scheme: dark;
+      --bg: #181919;
+      --panel: #252625;
+      --panel-soft: #2d2e2d;
+      --field: #353635;
+      --line: #3b3c3b;
+      --line-soft: #303130;
+      --text: #f3f3f1;
+      --muted: #a4a5a2;
+      --muted-2: #7f817e;
+      --blue: #78b9ef;
+      --blue-soft: #123e5e;
+      --green: #69d993;
+      --green-soft: #173e2a;
+      --red: #ef7a76;
+      --red-soft: #482525;
+      --amber: #f0a145;
+      --amber-soft: #49341e;
+      --shadow: 0 16px 42px rgba(0, 0, 0, .16);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html { min-width: 320px; background: var(--bg); scroll-behavior: smooth; }
+    body { min-width: 320px; margin: 0; color: var(--text); background: var(--bg); font-size: 14px; }
+    button, input { font: inherit; color: inherit; }
+    button:focus-visible, input:focus-visible {
+      outline: 2px solid var(--blue);
+      outline-offset: 2px;
+    }
+    button { border: 0; }
+    .app {
+      display: grid;
+      grid-template-columns: 54px minmax(0, 1fr);
+      width: min(1580px, 100%);
+      min-width: 0;
+      margin: 0 auto;
+    }
+    .rail {
+      min-width: 0;
+      border-right: 1px solid var(--line-soft);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      padding: 16px 7px;
+    }
+    .rail-mark {
+      min-height: 34px;
+      display: grid;
+      place-items: center;
+      margin-bottom: 5px;
+      color: var(--blue);
+    }
+    .shell {
+      min-width: 0;
+      display: grid;
+      gap: 12px;
+      padding: 0 12px 18px;
+    }
+    .icon {
+      width: 17px;
+      height: 17px;
+      display: block;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.7;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .icon-sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+    .icon-button {
+      width: 34px;
+      height: 34px;
+      padding: 0;
+      display: inline-grid;
+      place-items: center;
+      border-radius: 9px;
+      color: var(--muted);
+      background: transparent;
+      cursor: pointer;
+    }
+    .icon-button:hover { color: var(--text); background: rgba(255, 255, 255, .05); }
+    .topbar,
+    .topbar-left,
+    .topbar-right,
+    .section-head,
+    .metric-head,
+    .connection-head,
+    .status-line,
+    .confirm-actions {
+      display: flex;
+      align-items: center;
+    }
+    .topbar {
+      min-height: 58px;
+      gap: 10px;
+      border-bottom: 1px solid var(--line-soft);
+    }
+    .topbar-left { min-width: 0; gap: 10px; flex-wrap: wrap; }
+    .topbar-right { min-width: 0; gap: 8px; margin-left: auto; justify-content: flex-end; }
+    .brand { font-size: 18px; font-weight: 700; white-space: nowrap; letter-spacing: -.02em; }
+    .mode-select {
+      min-height: 32px;
+      padding: 0 13px;
+      display: inline-flex;
+      align-items: center;
+      border: 0;
+      border-radius: 16px;
+      color: var(--text);
+      background: var(--field);
+      white-space: nowrap;
+    }
+    .status-line { gap: 7px; white-space: nowrap; }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      background: var(--green);
+    }
+    .status-dot.warn { background: var(--amber); }
+    .status-dot.bad { background: var(--red); }
+    .status-dot.muted { background: var(--muted-2); }
+    .warning-text { color: var(--amber); font-weight: 600; }
+    .stream-meta { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .popover-anchor { position: relative; }
+    .popover-panel {
+      display: none;
+      position: absolute;
+      z-index: 20;
+      top: calc(100% + 8px);
+      right: 0;
+      width: min(320px, calc(100vw - 30px));
+      padding: 13px;
+      border-radius: 12px;
+      background: #303130;
+      box-shadow: 0 16px 46px rgba(0, 0, 0, .38);
+    }
+    .popover-panel.open { display: grid; gap: 9px; }
+    .avatar {
+      width: 34px;
+      height: 34px;
+      padding: 0;
+      border-radius: 50%;
+      color: var(--text);
+      background: var(--field);
+      cursor: pointer;
+    }
+    .notice-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .notice-list { display: grid; }
+    .notice-row { display: grid; gap: 3px; padding: 9px 0; border-bottom: 1px solid var(--line); }
+    .notice-row:last-child { border-bottom: 0; }
+    .card {
+      min-width: 0;
+      border-radius: 20px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+    .top-metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .metric-card {
+      min-height: 142px;
+      display: grid;
+      align-content: space-between;
+      gap: 12px;
+      padding: 16px 14px;
+    }
+    .metric-head { min-width: 0; gap: 9px; color: var(--muted); }
+    .metric-head .spark { margin-left: auto; }
+    .metric-icon { color: var(--blue); }
+    .spark { width: 58px; height: 28px; flex: 0 0 auto; color: var(--blue); }
+    .metric-value {
+      font-size: clamp(18px, 1.65vw, 22px);
+      font-weight: 700;
+      line-height: 1.12;
+      letter-spacing: -.025em;
+      font-variant-numeric: tabular-nums;
+      overflow-wrap: anywhere;
+    }
+    .metric-detail { color: var(--muted); font-size: 12px; line-height: 1.35; }
+    .overview-list { display: grid; gap: 8px; }
+    .overview-line { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
+    .middle-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 12px;
+      align-items: stretch;
+    }
+    .middle-grid > .panel { min-height: 590px; }
+    .panel {
+      min-width: 0;
+      display: grid;
+      align-content: start;
+      gap: 13px;
+      padding: 13px;
+    }
+    .section-head { min-width: 0; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+    .section-head h2 { margin: 0; font-size: 18px; line-height: 1.25; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 2px 9px;
+      border-radius: 999px;
+      color: var(--blue);
+      background: var(--blue-soft);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .settings-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 15px 14px;
+    }
+    .setting { min-width: 0; display: grid; gap: 6px; color: var(--text); font-size: 13px; font-weight: 600; }
+    .input-unit { position: relative; min-width: 0; }
+    .input-unit input {
+      width: 100%;
+      height: 37px;
+      padding: 0 76px 0 10px;
+      border: 0;
+      border-radius: 10px;
+      color: var(--text);
+      background: var(--field);
+      font-variant-numeric: tabular-nums;
+    }
+    .input-unit span {
+      position: absolute;
+      right: 10px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--muted);
+      font-size: 12px;
+      pointer-events: none;
+      white-space: nowrap;
+    }
+    .switches {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      padding-top: 4px;
+    }
+    .switch-item { min-width: 0; display: grid; gap: 6px; font-size: 13px; font-weight: 600; }
+    .switch-control { display: inline-flex; align-items: center; gap: 8px; width: fit-content; color: var(--text); font-weight: 500; cursor: pointer; }
+    .switch-control input {
+      appearance: none;
+      width: 36px;
+      height: 20px;
+      margin: 0;
+      position: relative;
+      flex: 0 0 auto;
+      border-radius: 999px;
+      background: #555754;
+      cursor: pointer;
+      transition: background .16s ease;
+    }
+    .switch-control input::after {
+      content: "";
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #ececea;
+      transition: transform .16s ease;
+    }
+    .switch-control input:checked { background: var(--blue); }
+    .switch-control input:checked::after { transform: translateX(16px); }
+    .switch-control input:disabled { cursor: default; opacity: .78; }
+    @media (prefers-reduced-motion: reduce) {
+      .switch-control input,
+      .switch-control input::after { transition: none; }
+    }
+    .settings-footer { display: flex; justify-content: flex-end; align-items: center; gap: 10px; }
+    .config-message { min-height: 18px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .btn {
+      min-height: 31px;
+      padding: 5px 15px;
+      border-radius: 10px;
+      color: var(--text);
+      background: var(--field);
+      cursor: pointer;
+    }
+    .btn:hover { filter: brightness(1.12); }
+    .btn:disabled { cursor: not-allowed; opacity: .52; filter: none; }
+    .btn-primary { color: #191a19; background: #f1f1ef; }
+    .btn-ghost { color: var(--muted); background: transparent; }
+    .btn-danger { color: #ffd0ce; background: var(--red-soft); }
+    .risk-banner {
+      display: grid;
+      grid-template-columns: .65fr 1fr 1.15fr 1.15fr;
+      align-items: center;
+      gap: 0;
+      padding: 3px 0 13px;
+      border-bottom: 1px solid var(--line);
+    }
+    .shield-badge { display: grid; place-items: center; color: var(--blue); }
+    .risk-segment { min-width: 0; display: grid; gap: 5px; padding: 0 12px; border-left: 1px solid var(--line); }
+    .muted { color: var(--muted); }
+    .small { font-size: 12px; }
+    .actions { display: grid; min-width: 0; }
+    .action-group-title { margin: 2px 0 1px; color: var(--muted-2); font-size: 11px; }
+    .action { min-width: 0; border-bottom: 1px solid var(--line); }
+    .action-main {
+      width: 100%;
+      min-height: 47px;
+      display: grid;
+      grid-template-columns: minmax(126px, .7fr) minmax(180px, 1.5fr) 72px;
+      align-items: center;
+      gap: 10px;
+      padding: 7px 0;
+      color: var(--text);
+      background: transparent;
+      text-align: left;
+      cursor: pointer;
+    }
+    .action-main:hover { background: rgba(255, 255, 255, .025); }
+    .action-name { font-weight: 650; }
+    .action-desc { color: var(--muted); font-size: 12px; line-height: 1.35; }
+    .action-main .btn { justify-self: end; min-width: 68px; text-align: center; }
+    .action-detail {
+      display: none;
+      width: 100%;
+      margin: 0 0 10px;
+      padding: 12px;
+      border-left: 2px solid var(--blue);
+      background: rgba(120, 185, 239, .055);
+    }
+    .action.open > .action-detail { display: grid; gap: 8px; }
+    .action-detail.refused { border-left-color: var(--red); background: rgba(239, 122, 118, .055); }
+    .confirm-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .confirm-head h3 { margin: 0; font-size: 15px; }
+    .action-detail p { margin: 0; color: #d3d4d1; font-size: 12px; line-height: 1.55; }
+    .facts { display: grid; grid-template-columns: minmax(125px, .7fr) minmax(0, 1.3fr); gap: 5px 12px; font-size: 12px; }
+    .facts span:nth-child(odd) { color: var(--muted); }
+    .confirm-actions { justify-content: flex-end; gap: 8px; }
+    .risk-note { display: flex; align-items: flex-start; gap: 7px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .connection-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .connection-card {
+      min-height: 130px;
+      display: grid;
+      align-content: space-between;
+      gap: 8px;
+      padding: 13px;
+      border-radius: 18px;
+      background: var(--panel-soft);
+      box-shadow: none;
+    }
+    .connection-head { gap: 7px; color: var(--muted); }
+    .connection-value { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .micro-bar { height: 3px; overflow: hidden; background: #3b3c3b; }
+    .micro-bar span { display: block; width: 100%; height: 100%; background: var(--blue); }
+    .good { color: var(--green); }
+    .bad { color: var(--red); }
+    .warn { color: var(--amber); }
+    .wear-panel { display: grid; gap: 10px; padding: 13px; }
+    .table-wrap { width: 100%; max-width: 100%; overflow-x: auto; }
+    table { width: 100%; min-width: 780px; border-collapse: collapse; font-size: 12px; }
+    th, td { padding: 9px 8px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    th { color: var(--muted); font-weight: 600; }
+    th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:last-child, td:last-child { text-align: left; }
+    tfoot th, tfoot td { color: #c9cac7; }
+    .direction,
+    .result-pill {
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      padding: 2px 8px;
+      border-radius: 999px;
+    }
+    .direction.long { color: var(--green); background: var(--green-soft); }
+    .direction.short { color: #f09b58; background: #472b1c; }
+    .result-pill { color: var(--text); background: #3c4145; }
+    .result-pill.good { color: var(--green); background: var(--green-soft); }
+    .result-pill.bad { color: var(--red); background: var(--red-soft); }
+    .empty { padding: 22px; color: var(--muted); text-align: center !important; }
+    .toast {
+      position: fixed;
+      z-index: 30;
+      top: 70px;
+      right: 18px;
+      display: none;
+      width: min(340px, calc(100vw - 36px));
+      padding: 13px 15px;
+      border-radius: 12px;
+      background: #363735;
+      box-shadow: 0 18px 52px rgba(0, 0, 0, .4);
+    }
+    .toast.show { display: block; }
+    @media (max-width: 1120px) {
+      .top-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .middle-grid { grid-template-columns: 1fr; }
+      .middle-grid > .panel { min-height: 0; }
+      .connection-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .stream-meta { display: none; }
+    }
+    @media (max-width: 760px) {
+      .app { grid-template-columns: 1fr; }
+      .rail { display: none; }
+      .shell { padding-inline: 8px; }
+      .topbar { align-items: flex-start; flex-wrap: wrap; padding: 10px 0; }
+      .topbar-left, .topbar-right { width: 100%; }
+      .topbar-right { margin-left: 0; justify-content: flex-start; }
+      .topbar-right .popover-anchor:first-of-type { margin-left: auto; }
+      .action-main { grid-template-columns: minmax(118px, .8fr) minmax(0, 1.2fr) 68px; }
+      .connection-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 500px) {
+      .shell { gap: 8px; padding-inline: 6px; }
+      .top-metrics, .settings-grid, .switches, .connection-grid { grid-template-columns: 1fr; }
+      .metric-card, .connection-card { min-height: auto; }
+      .metric-value { font-size: 19px; }
+      .mode-select { flex: 1 1 180px; width: auto; min-width: 0; }
+      .warning-text { width: 100%; }
+      .middle-grid { gap: 8px; }
+      .card { border-radius: 15px; }
+      .risk-banner { grid-template-columns: 1fr; gap: 10px; }
+      .shield-badge { display: none; }
+      .risk-segment { border-left: 0; padding: 0; }
+      .action-main { grid-template-columns: minmax(0, 1fr) 66px; }
+      .action-desc { grid-column: 1 / -1; grid-row: 2; }
+      .action-main .btn { grid-column: 2; grid-row: 1; }
+      .facts { grid-template-columns: 1fr; }
+      .facts span:nth-child(even) { margin-bottom: 4px; }
+    }
+  </style>
+</head>
+<body>
+  <svg class="icon-sprite" aria-hidden="true">
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.6-2.8 8-7 10-4.2-2-7-5.4-7-10V6z"/></symbol>
+  </svg>
+  <main class="app" id="dashboard">
+    <aside class="rail" aria-label="监控导航">
+      <div class="rail-mark" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M4 14h3l2-7 4 12 2-8h5"/></svg></div>
+      <button type="button" class="icon-button rail-jump" data-target="top" aria-label="概览">
+        <svg class="icon" viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6"/><rect x="14" y="4" width="6" height="6"/><rect x="4" y="14" width="6" height="6"/><rect x="14" y="14" width="6" height="6"/></svg>
+      </button>
+      <button type="button" class="icon-button rail-jump" data-target="settings" aria-label="策略设置">
+        <svg class="icon" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 12h3M11 12h9M4 17h8M16 17h4"/><circle cx="16" cy="7" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="14" cy="17" r="2"/></svg>
+      </button>
+      <button type="button" class="icon-button rail-jump" data-target="risk" aria-label="风险控制">
+        <svg class="icon"><use href="#i-shield"/></svg>
+      </button>
+      <button type="button" class="icon-button rail-jump" data-target="wear" aria-label="磨损记录">
+        <svg class="icon" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 9h16M9 4v16M4 15h16"/></svg>
+      </button>
+    </aside>
+
+    <div class="shell">
+      <header class="topbar" id="top">
+        <div class="topbar-left">
+          <span class="brand">自动化监控台</span>
+          <span class="mode-select">V5 原型 · 双边持仓</span>
+          <span class="status-line" id="runtime-state"><span class="status-dot"></span><span>等待连接</span></span>
+          <span class="status-line warning-text" id="headline-alert">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l9 16H3z"/><path d="M12 9v4M12 17h.01"/></svg>
+            <span>尚未收到运行状态</span>
+          </span>
+        </div>
+        <div class="topbar-right">
+          <span class="stream-meta" id="stream-meta">状态序号 - · 数据年龄 - · 200ms 推送</span>
+          <div class="popover-anchor">
+            <button type="button" class="icon-button" id="notice-toggle" aria-label="通知" aria-expanded="false">
+              <svg class="icon" viewBox="0 0 24 24"><path d="M18 9a6 6 0 00-12 0c0 7-3 7-3 7h18s-3 0-3-7M10 20h4"/></svg>
+            </button>
+            <div class="popover-panel" id="notice-panel">
+              <div class="notice-head"><strong>运行通知</strong><span class="badge" id="notice-count">2 条</span></div>
+              <div class="notice-list" id="notice-list">
+                <div class="notice-row"><span>本地模拟验收环境</span><span class="small muted">不连接交易所，不发送订单</span></div>
+                <div class="notice-row"><span>双方账户模拟对账完成</span><span class="small muted">数量一致 · 85ms 前</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="popover-anchor">
+            <button type="button" class="avatar" id="user-toggle" aria-label="用户菜单" aria-expanded="false">A</button>
+            <div class="popover-panel" id="user-panel">
+              <button type="button" class="btn btn-ghost" id="export-snapshot">导出当前状态快照</button>
+              <button type="button" class="btn btn-ghost" id="lock-controls">锁定风险控制</button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <section class="top-metrics" aria-label="关键指标">
+        <article class="card metric-card">
+          <div class="metric-head">
+            <span class="metric-icon"><svg class="icon" viewBox="0 0 24 24"><use href="#i-shield"/><path d="M9 12l2 2 4-5"/></svg></span>
+            <span>双边权威仓位</span>
+            <svg class="spark" viewBox="0 0 60 28" role="img" aria-label="仓位稳定趋势"><path d="M2 23L11 16L18 19L25 10L33 13L41 5L49 9L58 2" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+          </div>
+          <div class="metric-value" id="pair-position">Var - / Lit - BTC</div>
+          <div class="metric-detail status-line" id="pair-note"><span class="status-dot muted"></span><span>等待账户对账</span></div>
+        </article>
+        <article class="card metric-card">
+          <div class="metric-head">
+            <span class="metric-icon"><svg class="icon" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg></span>
+            <span>当前整轮净估值</span>
+            <svg class="spark" viewBox="0 0 60 28" role="img" aria-label="净估值波动"><path d="M2 8L10 22L18 13L26 20L34 7L42 18L50 12L58 15" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+          </div>
+          <div class="metric-value" id="round-estimate">- U</div>
+          <div class="metric-detail" id="round-note">当前无持仓</div>
+        </article>
+        <article class="card metric-card">
+          <div class="metric-head">
+            <span class="metric-icon"><svg class="icon" viewBox="0 0 24 24"><path d="M5 20V13M10 20V8M15 20V15M20 20V4"/></svg></span>
+            <span>近十轮平均磨损</span>
+            <svg class="spark" viewBox="0 0 60 28" role="img" aria-label="近十轮磨损柱形"><path d="M5 25V18M15 25V10M25 25V20M35 25V5M45 25V14M55 25V8" fill="none" stroke="currentColor" stroke-width="3"/></svg>
+          </div>
+          <div class="metric-value" id="average-wear">- U</div>
+          <div class="metric-detail" id="average-note">合计 - · 正 - / 负 -</div>
+        </article>
+        <article class="card metric-card">
+          <div class="metric-head">
+            <span class="metric-icon"><svg class="icon" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/></svg></span>
+            <span>状态概览</span>
+          </div>
+          <div class="overview-list">
+            <div class="overview-line"><span>命令通道</span><span class="status-line"><span class="status-dot" id="command-dot"></span><span id="command-overview">-</span></span></div>
+            <div class="overview-line"><span>私有流</span><span class="status-line"><span class="status-dot" id="private-dot"></span><span id="private-overview">-</span></span></div>
+            <div class="overview-line"><span>策略状态</span><span class="status-line"><span class="status-dot" id="strategy-dot"></span><span id="strategy-overview">-</span></span></div>
+          </div>
+        </article>
+      </section>
+
+      <section class="middle-grid">
+        <article class="card panel" id="settings">
+          <div class="section-head"><h2>策略参数与开仓设置</h2><span class="badge" id="config-state">运行值</span></div>
+          <div class="settings-grid">
+            <label class="setting" for="cfg-order"><span>单边开仓金额</span><span class="input-unit"><input id="cfg-order" type="number" min="1" step="1"><span>U / leg</span></span></label>
+            <label class="setting" for="cfg-wear"><span>允许磨损下限</span><span class="input-unit"><input id="cfg-wear" type="number" max="0" step="0.001"><span>U / round</span></span></label>
+            <label class="setting" for="cfg-buy"><span>做多 Var 开仓硬门槛</span><span class="input-unit"><input id="cfg-buy" type="number" step="0.0001"><span>%</span></span></label>
+            <label class="setting" for="cfg-sell"><span>做空 Var 开仓硬门槛</span><span class="input-unit"><input id="cfg-sell" type="number" step="0.0001"><span>%</span></span></label>
+            <label class="setting" for="cfg-age"><span>Lighter 数据中断容忍</span><span class="input-unit"><input id="cfg-age" type="number" min="50" step="10"><span>ms</span></span></label>
+            <label class="setting" for="cfg-early"><span>常规平仓阈值开始时间</span><span class="input-unit"><input id="cfg-early" type="number" min="0" step="1"><span>min</span></span></label>
+          </div>
+          <div class="switches">
+            <div class="switch-item"><span>策略实盘开仓</span><label class="switch-control" for="cfg-live"><input id="cfg-live" type="checkbox"><span id="cfg-live-label">关闭</span></label></div>
+            <div class="switch-item"><span>自动 Lighter 对冲</span><label class="switch-control"><input type="checkbox" checked disabled><span>开启</span></label></div>
+            <div class="switch-item"><span>数据中断保护</span><label class="switch-control"><input type="checkbox" checked disabled><span>开启</span></label></div>
+          </div>
+          <div class="settings-footer"><button class="btn btn-primary" id="save-config" type="button">检查并保存</button></div>
+          <div class="config-message" id="config-message">参数修改需确认；本地演示仅更新内存，不读取或写入真实 .env。</div>
+          <div class="action" id="config-action"><div class="action-detail" aria-live="polite"></div></div>
+        </article>
+
+        <article class="card panel" id="risk">
+          <div class="section-head"><h2>风险控制</h2><span class="badge" id="risk-lock">操作锁空闲</span></div>
+          <div class="risk-banner">
+            <div class="shield-badge"><svg class="icon"><use href="#i-shield"/></svg></div>
+            <div class="risk-segment"><span class="small muted">当前模式</span><strong id="risk-mode">监控中</strong></div>
+            <div class="risk-segment"><span class="small muted">风险状态</span><span class="status-line"><span class="status-dot" id="risk-dot"></span><strong id="risk-state">等待数据</strong></span></div>
+            <div class="risk-segment"><span class="small muted">运行健康</span><span class="status-line"><span class="status-dot" id="health-dot"></span><strong id="risk-health">-</strong></span></div>
+          </div>
+          <div class="actions" id="actions"></div>
+          <div class="risk-note">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>
+            <span>当前页面为纯本地模拟验收版。所有操作仍需读取模拟快照并经过 60 秒二次确认。</span>
+          </div>
+        </article>
+      </section>
+
+      <section class="card panel connections" aria-label="持仓与连接">
+        <div class="section-head"><h2>持仓与连接</h2><span class="small muted">实时权威快照（模拟）</span></div>
+        <div class="connection-grid">
+          <article class="card connection-card">
+            <div class="connection-head"><span class="metric-icon"><svg class="icon"><use href="#i-shield"/></svg></span><span>Var 仓位</span></div>
+            <div class="connection-value" id="var-position">- BTC</div>
+            <div class="small" id="var-position-note">等待权威快照</div>
+            <div class="micro-bar"><span></span></div>
+          </article>
+          <article class="card connection-card">
+            <div class="connection-head"><span class="metric-icon"><svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/></svg></span><span>Lighter 仓位</span></div>
+            <div class="connection-value" id="lighter-position">- BTC</div>
+            <div class="small" id="lighter-position-note">等待权威快照</div>
+            <div class="micro-bar"><span></span></div>
+          </article>
+          <article class="card connection-card">
+            <div class="connection-head"><svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3"/><path d="M6 20c0-4 2.7-6 6-6s6 2 6 6"/></svg><span>账户状态</span></div>
+            <div class="connection-value" id="account-state">-</div>
+            <div class="small" id="account-note">对账尚未完成</div>
+            <div class="status-line small"><span class="status-dot" id="account-dot"></span><span>资金安全</span></div>
+          </article>
+          <article class="card connection-card">
+            <div class="connection-head"><svg class="icon" viewBox="0 0 24 24"><path d="M10 13a5 5 0 007 0l2-2a5 5 0 00-7-7l-1 1M14 11a5 5 0 00-7 0l-2 2a5 5 0 007 7l1-1"/></svg><span>命令通道</span></div>
+            <div class="connection-value" id="command-state">-</div>
+            <div class="small" id="command-note">Var Bridge</div>
+            <div class="status-line small"><span class="status-dot" id="command-card-dot"></span><span id="command-stability">等待连接</span></div>
+          </article>
+          <article class="card connection-card">
+            <div class="connection-head"><svg class="icon" viewBox="0 0 24 24"><path d="M5 15a10 10 0 010-6M9 13a5 5 0 010-2M19 9a10 10 0 010 6M15 11a5 5 0 010 2"/><circle cx="12" cy="12" r="2"/></svg><span>私有流</span></div>
+            <div class="connection-value" id="private-state">-</div>
+            <div class="small" id="private-note">Lighter 成交回报</div>
+            <div class="status-line small"><span class="status-dot" id="private-card-dot"></span><span id="private-stability">等待连接</span></div>
+          </article>
+          <article class="card connection-card">
+            <div class="connection-head"><svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>持仓时间</span></div>
+            <div class="connection-value" id="held-time">-</div>
+            <div class="small">自本轮开仓</div>
+            <div class="status-line small"><span class="status-dot" id="held-dot"></span><span id="held-note">当前无持仓</span></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="card wear-panel" id="wear">
+        <div class="section-head">
+          <div class="topbar-left"><h2>近十轮磨损</h2><span class="badge">最终双边成交价修正口径</span></div>
+          <span class="small muted" id="wear-average">平均每轮 - U</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>轮次</th><th>方向</th><th>开仓磨损（U）</th><th>平仓磨损（U）</th><th>整轮磨损（U）</th><th>结果</th></tr></thead>
+            <tbody id="round-body"><tr><td colspan="6" class="empty">等待运行数据</td></tr></tbody>
+            <tfoot id="round-foot"></tfoot>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+  <div class="toast" id="toast" aria-live="polite"></div>
+
+  <script nonce="__VAR_LIT_CSP_NONCE__">
+    (() => {
+      const csrf = document.querySelector('meta[name="var-lit-csrf"]').content;
+      const $ = (id) => document.getElementById(id);
+      const setText = (id, value) => { $(id).textContent = value; };
+      const actionDefinitions = [
+        { group: '主控操作', key: 'pause_open', name: '暂停新开仓', desc: '暂停策略新开仓，保持监控、平仓与恢复。' },
+        { group: '主控操作', key: 'force_round_close', name: '强制整轮平仓', desc: '忽略收益阈值，保留成交与账户安全校验。', danger: true },
+        { group: '仓位处理', key: 'close_var_residual', name: '仅平 Var 残仓', desc: '仅平 Var 剩余仓位，不触发 Lighter 对冲。', danger: true },
+        { group: '仓位处理', key: 'close_lighter_residual', name: '仅平 Lighter 残仓', desc: '按账户精确数量提交 reduce-only 平仓。', danger: true },
+        { group: '辅助工具', key: 'refresh_var', name: '安全刷新 Var', desc: '确认无未决 Commit 后刷新模拟页面。' },
+        { group: '辅助工具', key: 'reconcile', name: '对账并恢复自动化', desc: '重新核验双方账户后恢复。' }
+      ];
+      let confirmationTimer = null;
+      let toastTimer = null;
+      let prepareRevision = 0;
+      let configDirty = false;
+      let controlsLocked = false;
+      let lastSnapshot = null;
+
+      const create = (tag, className = '', text) => {
+        const element = document.createElement(tag);
+        if (className) element.className = className;
+        if (text !== undefined) element.textContent = text;
+        return element;
+      };
+      const createButton = (text, className, onClick) => {
+        const button = create('button', className, text);
+        button.type = 'button';
+        button.addEventListener('click', onClick);
+        return button;
+      };
+      const detailHead = (title, tag) => {
+        const head = create('div', 'confirm-head');
+        head.append(create('h3', '', title), create('span', 'badge', tag));
+        return head;
+      };
+      const buttonRow = (...buttons) => {
+        const row = create('div', 'confirm-actions');
+        row.append(...buttons);
+        return row;
+      };
+      const formatSigned = (value, digits = 6, unit = '') => {
+        if (value == null || value === '') return `-${unit}`;
+        const number = Number(value);
+        if (!Number.isFinite(number)) return `-${unit}`;
+        return `${number >= 0 ? '+' : '−'}${Math.abs(number).toFixed(digits)}${unit}`;
+      };
+      const formatDuration = (seconds) => {
+        if (seconds == null) return '-';
+        const total = Math.max(0, Math.floor(Number(seconds)));
+        const hours = Math.floor(total / 3600);
+        const mins = Math.floor((total % 3600) / 60);
+        const secs = total % 60;
+        return hours ? `${hours}h ${mins}m` : `${mins}m ${secs}s`;
+      };
+      const stateText = (ok, good, bad) => ok ? good : bad;
+      const setDot = (element, tone) => {
+        element.classList.remove('warn', 'bad', 'muted');
+        if (tone) element.classList.add(tone);
+      };
+      const setTone = (element, tone) => {
+        element.classList.remove('good', 'bad', 'warn');
+        if (tone) element.classList.add(tone);
+      };
+
+      function showToast(message, tone = '') {
+        const toast = $('toast');
+        toast.textContent = message;
+        setTone(toast, tone);
+        toast.classList.add('show');
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => toast.classList.remove('show'), 2800);
+      }
+
+      function addNotice(title, detail) {
+        const row = create('div', 'notice-row');
+        row.append(create('span', '', title), create('span', 'small muted', detail));
+        $('notice-list').prepend(row);
+        setText('notice-count', `${$('notice-list').children.length} 条`);
+      }
+
+      function clearConfirmationTimer() {
+        if (confirmationTimer) clearTimeout(confirmationTimer);
+        confirmationTimer = null;
+      }
+
+      function closeAction(wrapper) {
+        prepareRevision += 1;
+        clearConfirmationTimer();
+        wrapper.classList.remove('open');
+        const trigger = wrapper.querySelector('.action-main');
+        if (trigger) trigger.setAttribute('aria-expanded', 'false');
+      }
+
+      function closeAllActions() {
+        document.querySelectorAll('.action.open').forEach(closeAction);
+      }
+
+      function buildActions() {
+        const root = $('actions');
+        let group = '';
+        for (const definition of actionDefinitions) {
+          if (definition.group !== group) {
+            group = definition.group;
+            root.appendChild(create('div', 'action-group-title', group));
+          }
+          const wrapper = create('div', 'action');
+          wrapper.dataset.action = definition.key;
+          wrapper.innerHTML = `
+            <button class="action-main" type="button" aria-expanded="false">
+              <span class="action-name"></span>
+              <span class="action-desc"></span>
+              <span class="btn ${definition.danger ? 'btn-danger' : ''}">执行</span>
+            </button>
+            <div class="action-detail" aria-live="polite"></div>`;
+          wrapper.querySelector('.action-name').textContent = definition.name;
+          wrapper.querySelector('.action-desc').textContent = definition.desc;
+          wrapper.querySelector('.action-main').addEventListener('click', () => toggleAction(definition, wrapper));
+          root.appendChild(wrapper);
+        }
+      }
+
+      async function api(path, body) {
+        const response = await fetch(path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Var-Lit-CSRF': csrf },
+          body: JSON.stringify(body),
+          cache: 'no-store'
+        });
+        const payload = await response.json().catch(() => ({ ok: false, error: `HTTP ${response.status}` }));
+        if (!response.ok && !payload.preview) throw new Error(payload.error || `HTTP ${response.status}`);
+        return payload;
+      }
+
+      async function toggleAction(definition, wrapper) {
+        const isOpen = wrapper.classList.contains('open');
+        closeAllActions();
+        if (isOpen) return;
+        if (controlsLocked && definition.key !== 'pause_open') {
+          wrapper.classList.add('open');
+          renderRefusal(wrapper, definition.name, '风险控制已锁定，请先从右上角用户菜单解锁。');
+          return;
+        }
+        wrapper.classList.add('open');
+        wrapper.querySelector('.action-main').setAttribute('aria-expanded', 'true');
+        const detail = wrapper.querySelector('.action-detail');
+        const revision = ++prepareRevision;
+        detail.classList.remove('refused');
+        detail.innerHTML = '<p>正在读取最新模拟账户与执行状态…</p>';
+        try {
+          const prepared = await api('/api/actions/prepare', { action: definition.key, payload: {} });
+          if (revision !== prepareRevision || !wrapper.classList.contains('open')) return;
+          wrapper.dataset.confirmationId = prepared.confirmationId || '';
+          renderActionDetail(definition, wrapper, prepared);
+        } catch (error) {
+          if (revision === prepareRevision && wrapper.classList.contains('open')) {
+            renderRefusal(wrapper, '无法准备操作', error.message);
+          }
+        }
+      }
+
+      function renderRefusal(wrapper, title, message) {
+        const detail = wrapper.querySelector('.action-detail');
+        detail.classList.add('refused');
+        detail.replaceChildren(
+          detailHead(title, '安全拒绝'),
+          create('p', '', message),
+          buttonRow(createButton('关闭', 'btn', () => closeAction(wrapper)))
+        );
+      }
+
+      function setExpiration(button, seconds) {
+        clearConfirmationTimer();
+        const timeout = Number(seconds) || 60;
+        button.textContent = `确认执行（${timeout}s内）`;
+        confirmationTimer = setTimeout(() => {
+          button.disabled = true;
+          button.textContent = '确认已过期';
+        }, timeout * 1000);
+      }
+
+      function renderActionDetail(definition, wrapper, prepared) {
+        const detail = wrapper.querySelector('.action-detail');
+        const preview = prepared.preview || {};
+        detail.classList.toggle('refused', !prepared.ok);
+        const content = [
+          detailHead(definition.name, prepared.ok ? '待确认' : '安全拒绝'),
+          create('p', '', preview.message || preview.reason || '请确认当前状态后执行。')
+        ];
+        const facts = preview.facts || {};
+        if (Object.keys(facts).length) {
+          const factRoot = create('div', 'facts');
+          for (const [label, value] of Object.entries(facts)) {
+            factRoot.append(create('span', '', label), create('span', '', String(value)));
+          }
+          content.push(factRoot);
+        }
+        const buttons = [
+          createButton(prepared.ok ? '取消' : '关闭', 'btn btn-ghost', () => closeAction(wrapper))
+        ];
+        if (prepared.ok && prepared.confirmationId) {
+          const confirm = createButton(
+            '',
+            `btn ${definition.danger ? 'btn-danger' : 'btn-primary'}`,
+            () => commitAction(definition, wrapper, confirm)
+          );
+          buttons.push(confirm);
+          setExpiration(confirm, prepared.expiresSeconds || 60);
+        }
+        content.push(buttonRow(...buttons));
+        detail.replaceChildren(...content);
+      }
+
+      async function commitAction(definition, wrapper, button) {
+        const confirmationId = wrapper.dataset.confirmationId;
+        if (!confirmationId) return;
+        clearConfirmationTimer();
+        button.disabled = true;
+        button.textContent = '执行中…';
+        try {
+          const result = await api('/api/actions/commit', { confirmationId });
+          const detail = wrapper.querySelector('.action-detail');
+          detail.classList.remove('refused');
+          detail.replaceChildren(
+            detailHead('操作已受理', '模拟结果'),
+            create('p', 'good', result.message || '已执行，并等待模拟账户快照确认结果。')
+          );
+          if (definition.key === 'stage_config') {
+            configDirty = false;
+            setText('config-state', '演示已保存');
+            setText('config-message', '演示参数已更新；没有读取或写入任何真实配置文件。');
+          }
+          showToast(result.message || '模拟操作已完成。', 'good');
+          addNotice(definition.name, '本地模拟操作 · 刚刚');
+        } catch (error) {
+          renderRefusal(wrapper, '操作未完成', error.message);
+          showToast(error.message, 'bad');
+        }
+      }
+
+      function render(snapshot) {
+        lastSnapshot = snapshot;
+        const health = snapshot.health || {};
+        const positions = snapshot.positions || {};
+        const metrics = snapshot.metrics || {};
+        const connections = snapshot.connections || {};
+        const strategy = snapshot.strategy || {};
+        const config = snapshot.config || {};
+        const recent = snapshot.recentRounds || [];
+
+        const runtime = $('runtime-state');
+        runtime.lastElementChild.textContent = health.runtimeActive ? '运行中' : '初始化中';
+        setDot(runtime.firstElementChild, health.runtimeActive ? '' : 'warn');
+        $('headline-alert').lastElementChild.textContent = health.headline || '运行状态正常';
+        setTone($('headline-alert'), health.level === 'error' ? 'bad' : health.level === 'warning' ? 'warn' : 'good');
+        setText('stream-meta', `状态序号 ${snapshot.sequence ?? '-'} · 数据年龄 ${snapshot.dataAgeMs ?? '-'}ms · 200ms 推送`);
+
+        setText('pair-position', `Var ${formatSigned(positions.var, 5)} / Lit ${formatSigned(positions.lighter, 5)} BTC`);
+        $('pair-note').lastElementChild.textContent = positions.matched ? '数量一致 · 当前无单边暴露' : (positions.reconcile || '等待权威对账');
+        setDot($('pair-note').firstElementChild, positions.matched ? '' : 'warn');
+        setText('round-estimate', formatSigned(metrics.currentRoundEstimate, 4, ' U'));
+        setText('round-note', metrics.currentRoundNote || '当前无持仓');
+        setText('average-wear', formatSigned(metrics.averageWear, 6, ' U'));
+        setText('average-note', `合计 ${formatSigned(metrics.totalWear, 6, ' U')} · 正 ${metrics.positiveRounds ?? 0} / 负 ${metrics.negativeRounds ?? 0}`);
+
+        setText('command-overview', stateText(connections.command, '已连接', '未连接'));
+        setDot($('command-dot'), connections.command ? '' : 'bad');
+        setText('private-overview', stateText(connections.privateStream, `正常 · ${connections.lighterAgeMs ?? '-'}ms`, '中断'));
+        setDot($('private-dot'), connections.privateStream ? '' : 'bad');
+        setText('strategy-overview', strategy.status || '-');
+        setDot($('strategy-dot'), strategy.openPaused ? 'warn' : '');
+
+        setText('risk-mode', strategy.openPaused ? '暂停新开仓' : (strategy.mode === 'live' ? '实盘运行（模拟）' : '观察模式'));
+        setText('risk-state', health.risk || '-');
+        setDot($('risk-dot'), health.level === 'error' ? 'bad' : health.level === 'warning' ? 'warn' : '');
+        setText('risk-health', `${snapshot.dataAgeMs ?? '-'}ms 数据延迟`);
+        setDot($('health-dot'), Number(snapshot.dataAgeMs) > 1000 ? 'bad' : '');
+        setText('risk-lock', controlsLocked ? '已锁定' : (health.actionBusy ? '操作执行中' : '未锁定'));
+
+        const pauseAction = document.querySelector('.action[data-action="pause_open"]');
+        if (pauseAction) {
+          pauseAction.querySelector('.action-name').textContent = strategy.openPaused ? '恢复新开仓' : '暂停新开仓';
+          pauseAction.querySelector('.action-desc').textContent = strategy.openPaused
+            ? '恢复策略新开仓许可，所有门槛与风控继续生效。'
+            : '暂停策略新开仓，保持监控、平仓与恢复。';
+        }
+
+        setText('var-position', `${formatSigned(positions.var, 5)} BTC`);
+        setText('lighter-position', `${formatSigned(positions.lighter, 5)} BTC`);
+        const positionNote = positions.matched ? '双边对冲 · 数量一致' : (positions.direction || '等待对账');
+        setText('var-position-note', positionNote);
+        setText('lighter-position-note', positionNote);
+        setText('account-state', positions.reconcile || '-');
+        setTone($('account-state'), positions.matched ? 'good' : 'warn');
+        setDot($('account-dot'), positions.matched ? '' : 'warn');
+        setText('account-note', positions.capturedAt ? `快照 ${positions.capturedAt}` : '等待权威快照');
+        setText('command-state', stateText(connections.command, '已连接', '未连接'));
+        setTone($('command-state'), connections.command ? 'good' : 'bad');
+        setDot($('command-card-dot'), connections.command ? '' : 'bad');
+        setText('command-note', `延迟 ${connections.varAgeMs ?? '-'}ms`);
+        setText('command-stability', connections.command ? '稳定' : '恢复中');
+        setText('private-state', stateText(connections.privateStream, '正常', '中断'));
+        setTone($('private-state'), connections.privateStream ? 'good' : 'bad');
+        setDot($('private-card-dot'), connections.privateStream ? '' : 'bad');
+        setText('private-note', `延迟 ${connections.lighterAgeMs ?? '-'}ms`);
+        setText('private-stability', connections.privateStream ? '流畅' : '恢复中');
+        setText('held-time', formatDuration(positions.heldSeconds));
+        setText('held-note', positions.direction || '当前无持仓');
+        setDot($('held-dot'), positions.heldSeconds == null ? 'muted' : '');
+
+        if (!configDirty) {
+          $('cfg-order').value = config.orderNotionalUsd ?? '';
+          $('cfg-wear').value = config.maxNormalRoundWearUsd ?? '';
+          $('cfg-buy').value = config.buyThresholdMinPct ?? '';
+          $('cfg-sell').value = config.sellThresholdMinPct ?? '';
+          $('cfg-age').value = config.maxQuoteAgeMs ?? '';
+          $('cfg-early').value = config.earlyExitMinutes ?? '';
+          $('cfg-live').checked = config.executionMode === 'live';
+          $('cfg-live-label').textContent = $('cfg-live').checked ? '开启' : '关闭';
+        }
+        renderRounds(recent, metrics);
+      }
+
+      function renderRounds(rounds, metrics) {
+        const body = $('round-body');
+        body.replaceChildren();
+        const sorted = [...rounds].sort((a, b) => Number(b.number) - Number(a.number)).slice(0, 10);
+        if (!sorted.length) {
+          const row = create('tr');
+          row.innerHTML = '<td colspan="6" class="empty">暂无完成轮次</td>';
+          body.appendChild(row);
+        } else {
+          for (const round of sorted) {
+            const row = create('tr');
+            const long = round.directionKey === 'long_var';
+            const result = Number(round.roundWear) >= 0 ? '正常盈利' : (round.withinLimit ? '可接受' : '突破下限');
+            row.innerHTML = '<td></td><td></td><td></td><td></td><td></td><td></td>';
+            row.children[0].textContent = round.number ?? '-';
+            const direction = create('span', `direction ${long ? 'long' : 'short'}`, round.direction || '-');
+            row.children[1].appendChild(direction);
+            row.children[2].textContent = formatSigned(round.openWear, 6);
+            row.children[3].textContent = formatSigned(round.closeWear, 6);
+            row.children[4].textContent = formatSigned(round.roundWear, 6);
+            const pill = create('span', `result-pill ${Number(round.roundWear) >= 0 ? 'good' : (round.withinLimit ? '' : 'bad')}`, result);
+            row.children[5].appendChild(pill);
+            body.appendChild(row);
+          }
+        }
+        setText('wear-average', `平均每轮 ${formatSigned(metrics.averageWear, 6, ' U')}`);
+        const foot = $('round-foot');
+        foot.innerHTML = `
+          <tr><th colspan="2">十轮合计</th><td></td><td></td><td></td><td></td></tr>
+          <tr><th colspan="2">每轮平均</th><td></td><td></td><td></td><td></td></tr>`;
+        const rows = foot.querySelectorAll('tr');
+        rows[0].children[1].textContent = formatSigned(metrics.totalOpenWear, 6);
+        rows[0].children[2].textContent = formatSigned(metrics.totalCloseWear, 6);
+        rows[0].children[3].textContent = formatSigned(metrics.totalWear, 6);
+        rows[0].children[4].textContent = `正 ${metrics.positiveRounds ?? 0} / 负 ${metrics.negativeRounds ?? 0}`;
+        const count = Math.max(1, sorted.length);
+        rows[1].children[1].textContent = formatSigned(Number(metrics.totalOpenWear || 0) / count, 6);
+        rows[1].children[2].textContent = formatSigned(Number(metrics.totalCloseWear || 0) / count, 6);
+        rows[1].children[3].textContent = formatSigned(metrics.averageWear, 6);
+        rows[1].children[4].textContent = `下限 ≥ ${formatSigned($('cfg-wear').value || 0, 6, ' U')}`;
+      }
+
+      async function prepareConfig() {
+        const payload = {
+          orderNotionalUsd: $('cfg-order').value,
+          maxNormalRoundWearUsd: $('cfg-wear').value,
+          buyThresholdMinPct: $('cfg-buy').value,
+          sellThresholdMinPct: $('cfg-sell').value,
+          maxQuoteAgeMs: $('cfg-age').value,
+          earlyExitMinutes: $('cfg-early').value,
+          executionMode: $('cfg-live').checked ? 'live' : 'observe'
+        };
+        const definition = { key: 'stage_config', name: '保存策略参数', danger: $('cfg-live').checked };
+        const wrapper = $('config-action');
+        closeAllActions();
+        wrapper.classList.add('open');
+        if (controlsLocked) {
+          renderRefusal(wrapper, definition.name, '风险控制已锁定，请先从右上角用户菜单解锁。');
+          return;
+        }
+        const revision = ++prepareRevision;
+        setText('config-message', '正在校验模拟参数…');
+        const detail = wrapper.querySelector('.action-detail');
+        detail.classList.remove('refused');
+        detail.innerHTML = '<p>正在读取最新模拟配置与安全状态…</p>';
+        try {
+          const prepared = await api('/api/actions/prepare', { action: definition.key, payload });
+          if (revision !== prepareRevision || !wrapper.classList.contains('open')) return;
+          wrapper.dataset.confirmationId = prepared.confirmationId || '';
+          renderActionDetail(definition, wrapper, prepared);
+        } catch (error) {
+          if (revision === prepareRevision && wrapper.classList.contains('open')) {
+            renderRefusal(wrapper, '参数校验未通过', error.message);
+          }
+        }
+      }
+
+      function togglePopover(panelId, triggerId) {
+        const panel = $(panelId);
+        const trigger = $(triggerId);
+        const open = !panel.classList.contains('open');
+        document.querySelectorAll('.popover-panel.open').forEach((node) => node.classList.remove('open'));
+        $('notice-toggle').setAttribute('aria-expanded', 'false');
+        $('user-toggle').setAttribute('aria-expanded', 'false');
+        panel.classList.toggle('open', open);
+        trigger.setAttribute('aria-expanded', String(open));
+      }
+
+      function connect() {
+        const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+        const socket = new WebSocket(`${scheme}://${location.host}/api/stream?csrf=${encodeURIComponent(csrf)}`);
+        socket.addEventListener('message', (event) => {
+          try { render(JSON.parse(event.data)); } catch (_) { /* retain the last valid snapshot */ }
+        });
+        socket.addEventListener('open', () => {
+          $('runtime-state').lastElementChild.textContent = '运行中';
+          setDot($('runtime-state').firstElementChild, '');
+        });
+        socket.addEventListener('close', () => {
+          $('runtime-state').lastElementChild.textContent = '连接恢复中';
+          setDot($('runtime-state').firstElementChild, 'warn');
+          setTimeout(connect, 1000);
+        });
+      }
+
+      buildActions();
+      document.querySelectorAll('.settings-grid input, #cfg-live').forEach((input) => {
+        input.addEventListener('input', () => {
+          configDirty = true;
+          setText('config-state', '有未保存修改');
+          setText('config-message', '参数尚未保存；本地演示只会更新内存。');
+          if (input.id === 'cfg-live') setText('cfg-live-label', input.checked ? '开启' : '关闭');
+          closeAction($('config-action'));
+        });
+      });
+      $('save-config').addEventListener('click', prepareConfig);
+      $('notice-toggle').addEventListener('click', () => togglePopover('notice-panel', 'notice-toggle'));
+      $('user-toggle').addEventListener('click', () => togglePopover('user-panel', 'user-toggle'));
+      $('lock-controls').addEventListener('click', () => {
+        controlsLocked = !controlsLocked;
+        if (controlsLocked) closeAllActions();
+        setText('lock-controls', controlsLocked ? '解锁风险控制' : '锁定风险控制');
+        setText('risk-lock', controlsLocked ? '已锁定' : '未锁定');
+        showToast(controlsLocked ? '风险控制已锁定。' : '风险控制已解锁。');
+      });
+      $('export-snapshot').addEventListener('click', () => {
+        if (!lastSnapshot) return;
+        const payload = { exportedAt: new Date().toISOString(), snapshot: lastSnapshot };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = 'var-lit-dashboard-snapshot.json';
+        link.click();
+        URL.revokeObjectURL(link.href);
+        showToast('当前本地模拟状态快照已导出。', 'good');
+      });
+      document.querySelectorAll('.rail-jump').forEach((button) => {
+        button.addEventListener('click', () => $(button.dataset.target).scrollIntoView({ behavior: 'smooth', block: 'start' }));
+      });
+      document.addEventListener('click', (event) => {
+        if (!event.target.closest('.popover-anchor')) {
+          document.querySelectorAll('.popover-panel.open').forEach((node) => node.classList.remove('open'));
+          $('notice-toggle').setAttribute('aria-expanded', 'false');
+          $('user-toggle').setAttribute('aria-expanded', 'false');
+        }
+      });
+      connect();
+    })();
+  </script>
+</body>
+</html>

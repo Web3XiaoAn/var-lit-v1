@@ -44,6 +44,7 @@ from variational.lighter_order_entry import (
     LighterOrderEntryUnavailable,
     LighterOrderEntryUnknown,
 )
+from variational.operations_dashboard import OperationsDashboardServer
 from variational.telemetry import AsyncJsonlWriter
 from variational.research_database import (
     DEFAULT_MAX_DATABASE_BYTES,
@@ -90,6 +91,9 @@ FORWARDER_HOST = "127.0.0.1"
 FORWARDER_WS_PORT = 8766
 FORWARDER_REST_PORT = 8767
 FORWARDER_COMMAND_PORT = 8768
+OPERATIONS_DASHBOARD_HOST = "127.0.0.1"
+DEFAULT_OPERATIONS_DASHBOARD_PORT = 8780
+OPERATIONS_DASHBOARD_ASSET_DIR = Path(__file__).resolve().parent / "dashboard"
 DOTENV_FILE = Path(__file__).resolve().parent / ".env"
 LOG_DIR = Path(os.environ.get("VARIATIONAL_RUNTIME_DIR", "./log"))
 OUTPUT_DIR = LOG_DIR
@@ -216,10 +220,15 @@ RUNTIME_DOTENV_REQUIRED_KEYS = frozenset(
 RUNTIME_DOTENV_OPTIONAL_KEYS = frozenset(
     {
         "VARIATIONAL_RUNTIME_DIR",
+        "OPERATIONS_DASHBOARD_ENABLED",
+        "OPERATIONS_DASHBOARD_PORT",
         "RESEARCH_DATABASE_ENABLED",
         "RESEARCH_DATABASE_FILE",
         "RESEARCH_DATABASE_MAX_MIB",
         "RESEARCH_DATABASE_SYNC_SECONDS",
+        "STRATEGY_MAX_NORMAL_ROUND_WEAR_BPS",
+        "STRATEGY_MAX_QUOTE_AGE_MS",
+        "STRATEGY_EARLY_EXIT_MINUTES",
     }
 )
 RUNTIME_DOTENV_ALLOWED_KEYS = (
@@ -2238,6 +2247,21 @@ class VariationalToLighterRuntime:
         self.trade_task: asyncio.Task[None] | None = None
         self.strategy_signal_task: asyncio.Task[None] | None = None
         self.dashboard_task: asyncio.Task[None] | None = None
+        dashboard_setting = optional_env_bool("OPERATIONS_DASHBOARD_ENABLED")
+        self.operations_dashboard_enabled = dashboard_setting is not False
+        try:
+            self.operations_dashboard_port = int(
+                optional_env("OPERATIONS_DASHBOARD_PORT")
+                or str(DEFAULT_OPERATIONS_DASHBOARD_PORT)
+            )
+        except ValueError as exc:
+            raise RuntimeError("OPERATIONS_DASHBOARD_PORT must be an integer") from exc
+        if not 1 <= self.operations_dashboard_port <= 65535:
+            raise RuntimeError("OPERATIONS_DASHBOARD_PORT must be between 1 and 65535")
+        self.operations_dashboard_server: OperationsDashboardServer | None = None
+        self._operations_dashboard_sequence = 0
+        self._operator_action_lock = asyncio.Lock()
+        self._operator_action_inflight = False
         self.reconcile_task: asyncio.Task[None] | None = None
         self.lighter_order_watchdog_task: asyncio.Task[None] | None = None
         self.var_intent_watchdog_task: asyncio.Task[None] | None = None
@@ -2263,6 +2287,7 @@ class VariationalToLighterRuntime:
         self.pending_var_intent: VarOrderIntent | None = None
         self.automation_paused = False
         self.automation_pause_reason = "-"
+        self.operator_open_paused = False
         self.automation_ready = False
         self.last_reconcile_status = "not checked"
         self.last_reconcile_outcome = AccountReconcileOutcome.UNKNOWN
@@ -2385,6 +2410,7 @@ class VariationalToLighterRuntime:
                     },
                     "automation_paused": self.automation_paused,
                     "automation_pause_reason": self.automation_pause_reason,
+                    "operator_open_paused": self.operator_open_paused,
                 }
             state_sig = json.dumps(
                 payload,
@@ -3015,6 +3041,11 @@ class VariationalToLighterRuntime:
                 )
             ):
                 self._reconcile_pause_reason = saved_reason
+
+        raw_operator_open_paused = payload.get("operator_open_paused", False)
+        if not isinstance(raw_operator_open_paused, bool):
+            raise RuntimeError("Runtime state operator_open_paused must be boolean")
+        self.operator_open_paused = raw_operator_open_paused
 
         if isinstance(raw_intent, dict):
             def intent_text(key: str, *, required: bool = False) -> str | None:
@@ -4160,34 +4191,42 @@ class VariationalToLighterRuntime:
             except Exception as exc:
                 self.logger.warning("Lighter order reconciliation failed: %s", exc)
 
-    async def emergency_flatten_var(self, record: OrderLifecycle) -> None:
+    async def emergency_flatten_var(
+        self,
+        record: OrderLifecycle,
+        *,
+        intent_phase: str = "emergency_close",
+    ) -> bool:
+        if intent_phase not in {"emergency_close", "operator_var_only_close"}:
+            raise ValueError("unsupported emergency Var close phase")
         if record.lighter_reduce_only or self.pending_var_intent is not None:
-            return
+            return False
         current_open = await self._current_open_record()
         if current_open is None or current_open.trade_key != record.trade_key:
             self.pause_automation(
                 "Emergency Var flatten skipped because the source position is no "
                 "longer the locally tracked open; reconcile both accounts"
             )
-            return
+            return False
         side = opposite_var_order_side(record.side)
         close_qty = normalize_var_base_qty(record.qty)
         close_notional = var_open_notional_usd(record)
         if side is None or close_qty is None or close_notional is None:
             self.pause_automation("Emergency Var flatten could not determine side or quantity")
-            return
+            return False
         if not await self.runtime.command_broker.extension_connected():
             self.pause_automation("Emergency Var flatten unavailable: command channel disconnected")
-            return
+            return False
 
         self._auto_var_order_inflight = True
         expected_intent = await self.mark_and_persist_var_intent(
-            "emergency_close",
+            intent_phase,
             side,
             close_notional,
         )
         self.last_auto_var_close_status = f"emergency {side} {self._fmt_notional(close_notional)}"
         commit_dispatched = False
+        succeeded = False
         try:
             common = {
                 "side": side,
@@ -4262,7 +4301,7 @@ class VariationalToLighterRuntime:
                 }
                 trace_id = new_trace_id()
                 prepared_intent = await self.prepare_pending_var_intent(
-                    phase="emergency_close",
+                    phase=intent_phase,
                     side=side,
                     amount=close_notional,
                     trace_id=trace_id,
@@ -4270,7 +4309,7 @@ class VariationalToLighterRuntime:
                     expected_intent=expected_intent,
                 )
                 if prepared_intent is None or not await self.mark_pending_var_intent_committing(
-                    phase="emergency_close",
+                    phase=intent_phase,
                     side=side,
                     trace_id=trace_id,
                     expected_intent=prepared_intent,
@@ -4315,7 +4354,7 @@ class VariationalToLighterRuntime:
                             )
                         except asyncio.CancelledError:
                             await self.mark_pending_var_intent_commit_ambiguous(
-                                phase="emergency_close",
+                                phase=intent_phase,
                                 side=side,
                                 trace_id=trace_id,
                                 expected_intent=prepared_intent,
@@ -4323,7 +4362,7 @@ class VariationalToLighterRuntime:
                             raise
                         except Exception:
                             await self.mark_pending_var_intent_commit_ambiguous(
-                                phase="emergency_close",
+                                phase=intent_phase,
                                 side=side,
                                 trace_id=trace_id,
                                 expected_intent=prepared_intent,
@@ -4346,7 +4385,7 @@ class VariationalToLighterRuntime:
                                     prepared_intent.commit_accepted_monotonic = time.monotonic()
                         elif var_result_is_ambiguous(result):
                             await self.mark_pending_var_intent_commit_ambiguous(
-                                phase="emergency_close",
+                                phase=intent_phase,
                                 side=side,
                                 trace_id=trace_id,
                                 expected_intent=prepared_intent,
@@ -4359,7 +4398,7 @@ class VariationalToLighterRuntime:
                     expected_intent=expected_intent,
                 )
             await self.append_auto_var_result_log(
-                phase="emergency_close",
+                phase=intent_phase,
                 side=side,
                 amount=close_notional,
                 base_qty=close_qty,
@@ -4374,6 +4413,8 @@ class VariationalToLighterRuntime:
                         expected_intent=expected_intent,
                     )
                 self.pause_automation(f"Emergency Var flatten failed: {result.get('error') or 'unknown'}")
+            else:
+                succeeded = True
         except Exception as exc:
             if not commit_dispatched:
                 self.clear_matching_var_intent(
@@ -4385,6 +4426,7 @@ class VariationalToLighterRuntime:
         finally:
             self._auto_var_order_inflight = False
             await self.persist_runtime_state()
+        return succeeded
 
     def transition_in_progress(self) -> bool:
         if self.pending_var_intent is not None or self._auto_var_order_inflight:
@@ -4795,7 +4837,10 @@ class VariationalToLighterRuntime:
             record.open_notional_usd = record.qty * record.var_fill_price
         if not record.lighter_client_order_ids and record.lighter_reserved_client_order_id is None:
             record.lighter_reserved_client_order_id = intent.lighter_client_order_index
-        if intent.phase != "open":
+        if intent.phase == "operator_var_only_close":
+            record.auto_hedge_enabled = False
+            record.lighter_reduce_only = False
+        elif intent.phase != "open":
             record.lighter_reduce_only = True
         if record.execution_state == "UNKNOWN":
             record.execution_state = EXECUTION_STATE_VAR_COMMITTED
@@ -4880,7 +4925,10 @@ class VariationalToLighterRuntime:
                     strategy_tag=ADAPTIVE_MODEL_VERSION,
                 )
                 self.pending_var_intent = intent
-            if (
+            if phase == "operator_var_only_close":
+                intent.lighter_client_order_index = None
+                intent.lighter_client_order_collision = 0
+            elif (
                 intent.firm_quote_id != quote_id
                 or intent.lighter_client_order_index is None
             ):
@@ -5368,6 +5416,8 @@ class VariationalToLighterRuntime:
             return "observe mode never opens a position"
         if not self.args.auto_hedge:
             return "automatic Lighter hedge is disabled"
+        if self.operator_open_paused:
+            return "new opens are paused by operator"
         if self.automation_paused:
             self._canary_session_state = CANARY_SESSION_HALTED
             return "automation is paused"
@@ -10324,7 +10374,8 @@ class VariationalToLighterRuntime:
                     record.execution_state = VAR_INTENT_COMMITTING
                 if (
                     event.get("recovered_from_portfolio")
-                    and pending_intent.phase != "emergency_close"
+                    and pending_intent.phase
+                    not in {"emergency_close", "operator_var_only_close"}
                     and record.lighter_reserved_client_order_id is not None
                 ):
                     if not self._terminal_lighter_hedge_is_complete_locked(record):
@@ -10464,13 +10515,19 @@ class VariationalToLighterRuntime:
         if (
             filled_record is not None
             and self.args.auto_hedge
+            and filled_record.auto_hedge_enabled
             and filled_record.hedge_status == "error"
             and not filled_record.lighter_reduce_only
         ):
             await self.emergency_flatten_var(filled_record)
             return
 
-        if filled_record is not None and self.args.auto_hedge and filled_record.hedge_status == "not_started":
+        if (
+            filled_record is not None
+            and self.args.auto_hedge
+            and filled_record.auto_hedge_enabled
+            and filled_record.hedge_status == "not_started"
+        ):
             if (
                 matching_open_before_create is not None
                 and not lighter_hedge_filled(matching_open_before_create)
@@ -10793,6 +10850,7 @@ class VariationalToLighterRuntime:
         return {
             "observe mode never opens a position": "观察模式不自动开仓",
             "automatic Lighter hedge is disabled": "Lighter自动对冲未开启",
+            "new opens are paused by operator": "操作员已暂停新开仓",
             "automation is paused": "自动化处于安全暂停",
             "parameter epoch is not yet available": "动态参数尚未就绪",
             "one-hour observe warmup is not complete": "一小时实时窗口尚未就绪",
@@ -11081,6 +11139,649 @@ class VariationalToLighterRuntime:
             "allowed": allowed,
             "reason": reason,
         }
+
+    async def operations_dashboard_snapshot(self) -> dict[str, Any]:
+        """Return one JSON-safe, presentation-only operations snapshot."""
+
+        self._operations_dashboard_sequence += 1
+        var_age = await self.get_variational_quote_age_ms(self.variational_ticker)
+        lighter_age = await self.get_lighter_quote_age_ms()
+        command_connected = await self.runtime.command_broker.extension_connected()
+        current_open = await self._current_open_record()
+        async with self._record_lock:
+            ordered_records = [
+                self.records[key]
+                for key in self.record_order
+                if key in self.records
+            ]
+        _current, completed_rounds = build_trade_rounds(ordered_records)
+        recent_rounds = completed_rounds[-10:]
+        normal_wear_usd = (
+            self.strategy_config.order_notional_usd
+            * self.strategy_config.max_normal_round_wear_bps
+            / Decimal("10000")
+        )
+        round_rows: list[dict[str, Any]] = []
+        total_open = Decimal("0")
+        total_close = Decimal("0")
+        positive_rounds = 0
+        negative_rounds = 0
+        first_number = len(completed_rounds) - len(recent_rounds) + 1
+        for offset, trade_round in enumerate(recent_rounds):
+            open_pnl = trade_round.open_result.pnl
+            close_pnl = trade_round.close_result.pnl
+            round_pnl = trade_round.round_pnl
+            if open_pnl is not None:
+                total_open += open_pnl
+            if close_pnl is not None:
+                total_close += close_pnl
+            if round_pnl is not None and round_pnl >= 0:
+                positive_rounds += 1
+            elif round_pnl is not None:
+                negative_rounds += 1
+            long_var = trade_round.open_record.side.strip().lower() == "buy"
+            round_rows.append(
+                {
+                    "number": first_number + offset,
+                    "directionKey": "long_var" if long_var else "short_var",
+                    "direction": (
+                        "多 Var / 空 Lighter"
+                        if long_var
+                        else "空 Var / 多 Lighter"
+                    ),
+                    "openWear": decimal_to_str(open_pnl),
+                    "closeWear": decimal_to_str(close_pnl),
+                    "roundWear": decimal_to_str(round_pnl),
+                    "withinLimit": bool(
+                        round_pnl is not None and round_pnl >= -normal_wear_usd
+                    ),
+                }
+            )
+        total_round = sum(
+            (
+                trade_round.round_pnl
+                for trade_round in recent_rounds
+                if trade_round.round_pnl is not None
+            ),
+            Decimal("0"),
+        )
+        completed_with_pnl = sum(
+            1 for trade_round in recent_rounds if trade_round.round_pnl is not None
+        )
+        average_round = (
+            total_round / Decimal(completed_with_pnl)
+            if completed_with_pnl
+            else None
+        )
+        decision = self.last_strategy_decision
+        close_candidate = decision.close_candidate if decision is not None else None
+        current_round_estimate = (
+            close_candidate.round_lower_bound_usd
+            if current_open is not None and close_candidate is not None
+            else None
+        )
+        account = self.last_account_snapshot
+        var_position = account.var_position if account is not None else None
+        lighter_position = account.lighter_position if account is not None else None
+        positions_match = self.last_reconcile_outcome is AccountReconcileOutcome.FRESH_MATCH
+        direction = None
+        held_seconds = None
+        if current_open is not None:
+            long_var = current_open.side.strip().lower() == "buy"
+            direction = "多 Var / 空 Lighter" if long_var else "空 Var / 多 Lighter"
+            held_seconds = record_hold_seconds(current_open)
+        ages = [age for age in (var_age, lighter_age) if age is not None]
+        data_age = max(ages) if len(ages) == 2 else None
+        if self.automation_paused:
+            headline = f"安全暂停：{self._dashboard_pause_text(self.automation_pause_reason, True)}"
+            level = "error"
+            risk = "需要人工检查"
+        elif self.operator_open_paused:
+            headline = "操作员已暂停新开仓"
+            level = "warning"
+            risk = "新开仓已暂停"
+        elif self.last_reconcile_outcome is AccountReconcileOutcome.FRESH_MISMATCH:
+            headline = "权威账户仓位不一致"
+            level = "error"
+            risk = "单边暴露风险"
+        elif not command_connected:
+            headline = "Var 命令通道未连接"
+            level = "warning"
+            risk = "新开仓被阻止"
+        else:
+            headline = "策略与风控运行正常"
+            level = "normal"
+            risk = "策略运行稳定"
+        strategy_status = (
+            "安全暂停"
+            if self.automation_paused
+            else ("新开仓暂停" if self.operator_open_paused else "运行中")
+        )
+        return {
+            "schema": "var-lit-v1-operations-state-v1",
+            "sequence": self._operations_dashboard_sequence,
+            "generatedAt": utc_now(),
+            "dataAgeMs": data_age,
+            "health": {
+                "runtimeActive": not self.stop_flag,
+                "headline": headline,
+                "level": level,
+                "risk": risk,
+                "actionBusy": self._operator_action_inflight,
+            },
+            "connections": {
+                "command": command_connected,
+                "privateStream": self.lighter_private_stream_ready,
+                "lighterOrderEntry": self.lighter_order_entry_is_ready(),
+                "varAgeMs": var_age,
+                "lighterAgeMs": lighter_age,
+            },
+            "positions": {
+                "var": decimal_to_str(var_position),
+                "lighter": decimal_to_str(lighter_position),
+                "activeOrders": (
+                    account.lighter_active_orders if account is not None else None
+                ),
+                "capturedAt": account.captured_at if account is not None else None,
+                "matched": positions_match,
+                "reconcile": self._dashboard_reconcile_text(
+                    self.last_reconcile_outcome, True
+                ),
+                "direction": direction,
+                "heldSeconds": held_seconds,
+            },
+            "strategy": {
+                "mode": self.strategy_config.execution_mode,
+                "status": strategy_status,
+                "openPaused": self.operator_open_paused,
+                "automationPaused": self.automation_paused,
+                "pauseReason": self.automation_pause_reason,
+                "automationReady": self.automation_ready,
+            },
+            "config": {
+                "executionMode": self.strategy_config.execution_mode,
+                "orderNotionalUsd": decimal_to_str(
+                    self.strategy_config.order_notional_usd
+                ),
+                "maxNormalRoundWearUsd": decimal_to_str(-normal_wear_usd),
+                "buyThresholdMinPct": decimal_to_str(
+                    self.strategy_config.buy_dynamic_threshold_min_pct
+                ),
+                "sellThresholdMinPct": decimal_to_str(
+                    self.strategy_config.sell_dynamic_threshold_min_pct
+                ),
+                "maxQuoteAgeMs": self.strategy_config.max_quote_age_ms,
+                "earlyExitMinutes": decimal_to_str(
+                    Decimal(self.strategy_config.early_exit_seconds) / Decimal("60")
+                ),
+            },
+            "metrics": {
+                "currentRoundEstimate": decimal_to_str(current_round_estimate),
+                "currentRoundNote": (
+                    "当前可执行平仓估值；最终轮次仍以双边成交价结算"
+                    if current_open is not None
+                    else "当前无持仓"
+                ),
+                "totalOpenWear": decimal_to_str(total_open),
+                "totalCloseWear": decimal_to_str(total_close),
+                "totalWear": decimal_to_str(total_round),
+                "averageWear": decimal_to_str(average_round),
+                "positiveRounds": positive_rounds,
+                "negativeRounds": negative_rounds,
+            },
+            "recentRounds": round_rows,
+        }
+
+    async def _operator_state_guard(self) -> str:
+        current_open = await self._current_open_record()
+        account = self.last_account_snapshot
+        payload = {
+            "account_captured_at": account.captured_at if account else None,
+            "var_position": decimal_to_str(account.var_position) if account else None,
+            "lighter_position": (
+                decimal_to_str(account.lighter_position) if account else None
+            ),
+            "active_orders": account.lighter_active_orders if account else None,
+            "current_open": current_open.trade_key if current_open else None,
+            "pending_intent": (
+                self.pending_var_intent.state if self.pending_var_intent else None
+            ),
+            "transition": self.transition_in_progress(),
+            "operator_open_paused": self.operator_open_paused,
+            "automation_paused": self.automation_paused,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    def _authoritative_account_error(self) -> str | None:
+        account = self.last_account_snapshot
+        if account is None:
+            return "尚无权威账户快照"
+        captured = parse_iso_datetime(account.captured_at)
+        maximum_age = max(10.0, self.strategy_config.reconcile_interval_seconds * 2)
+        if (
+            captured is None
+            or (datetime.now(timezone.utc) - captured).total_seconds() > maximum_age
+        ):
+            return "权威账户快照已过期，请先执行账户对账"
+        if account.lighter_active_orders != 0:
+            return f"Lighter 仍有 {account.lighter_active_orders} 个活动委托"
+        return None
+
+    def _config_updates_from_dashboard(
+        self,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, str] | None, str | None, dict[str, str]]:
+        desired_order = to_decimal(payload.get("orderNotionalUsd"))
+        desired_wear = to_decimal(payload.get("maxNormalRoundWearUsd"))
+        desired_buy = to_decimal(payload.get("buyThresholdMinPct"))
+        desired_sell = to_decimal(payload.get("sellThresholdMinPct"))
+        desired_age = to_int(payload.get("maxQuoteAgeMs"))
+        desired_early = to_decimal(payload.get("earlyExitMinutes"))
+        desired_mode = str(payload.get("executionMode") or "").strip().lower()
+        facts = {
+            "执行模式": desired_mode or "-",
+            "单边金额": f"{desired_order} U" if desired_order is not None else "-",
+            "磨损下限": f"{desired_wear} U" if desired_wear is not None else "-",
+            "做多硬门槛": f"{desired_buy}%" if desired_buy is not None else "-",
+            "做空硬门槛": f"{desired_sell}%" if desired_sell is not None else "-",
+        }
+        if desired_order is None or desired_order <= 0:
+            return None, "单边开仓金额必须大于 0", facts
+        if desired_wear is None or desired_wear >= 0:
+            return None, "允许磨损下限必须是负数", facts
+        wear_bps = -desired_wear * Decimal("10000") / desired_order
+        candidate_payload = {
+            "executionMode": desired_mode,
+            "orderNotionalUsd": decimal_to_str(desired_order),
+            "buyDynamicThresholdMinPct": decimal_to_str(desired_buy),
+            "sellDynamicThresholdMinPct": decimal_to_str(desired_sell),
+            "maxNormalRoundWearBps": decimal_to_str(wear_bps),
+            "maxQuoteAgeMs": desired_age,
+            "earlyExitMinutes": decimal_to_str(desired_early),
+        }
+        candidate = strategy_config_from_payload(
+            candidate_payload,
+            current=self.strategy_config,
+        )
+        expected = (
+            desired_mode in STRATEGY_EXECUTION_MODES
+            and candidate.order_notional_usd == desired_order
+            and desired_buy is not None
+            and candidate.buy_dynamic_threshold_min_pct == desired_buy
+            and desired_sell is not None
+            and candidate.sell_dynamic_threshold_min_pct == desired_sell
+            and candidate.max_normal_round_wear_bps == wear_bps
+            and desired_age is not None
+            and candidate.max_quote_age_ms == desired_age
+            and desired_early is not None
+            and candidate.early_exit_seconds == int(desired_early * Decimal("60"))
+        )
+        if not expected:
+            return None, "参数超出策略允许范围或格式无效", facts
+        updates = {
+            "STRATEGY_EXECUTION_MODE": candidate.execution_mode,
+            "STRATEGY_ORDER_NOTIONAL_USD": decimal_to_str(
+                candidate.order_notional_usd
+            ) or "0",
+            "STRATEGY_BUY_DYNAMIC_THRESHOLD_MIN_PCT": decimal_to_str(
+                candidate.buy_dynamic_threshold_min_pct
+            ) or "0",
+            "STRATEGY_SELL_DYNAMIC_THRESHOLD_MIN_PCT": decimal_to_str(
+                candidate.sell_dynamic_threshold_min_pct
+            ) or "0",
+            "STRATEGY_MAX_NORMAL_ROUND_WEAR_BPS": decimal_to_str(
+                candidate.max_normal_round_wear_bps
+            ) or "0",
+            "STRATEGY_MAX_QUOTE_AGE_MS": str(candidate.max_quote_age_ms),
+            "STRATEGY_EARLY_EXIT_MINUTES": decimal_to_str(
+                Decimal(candidate.early_exit_seconds) / Decimal("60")
+            ) or "0",
+        }
+        facts["折算磨损"] = f"{updates['STRATEGY_MAX_NORMAL_ROUND_WEAR_BPS']} bps/round"
+        return updates, None, facts
+
+    async def prepare_operations_action(
+        self,
+        action: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        supported = {
+            "pause_open",
+            "force_round_close",
+            "close_var_residual",
+            "close_lighter_residual",
+            "refresh_var",
+            "reconcile",
+            "stage_config",
+        }
+        if action not in supported:
+            return {"allowed": False, "reason": "未知操作"}
+        guard = await self._operator_state_guard()
+        account = self.last_account_snapshot
+        current_open = await self._current_open_record()
+        facts = {
+            "Var 权威仓位": (
+                f"{account.var_position} BTC" if account is not None else "-"
+            ),
+            "Lighter 权威仓位": (
+                f"{account.lighter_position} BTC" if account is not None else "-"
+            ),
+            "活动委托": (
+                str(account.lighter_active_orders) if account is not None else "-"
+            ),
+            "执行中转换": "是" if self.transition_in_progress() else "否",
+        }
+        if self._operator_action_inflight:
+            return {"allowed": False, "reason": "另一个操作正在执行", "facts": facts}
+        if action == "pause_open":
+            return {
+                "allowed": True,
+                "guard": guard,
+                "message": (
+                    "确认恢复策略新开仓；其他所有风控门槛仍会继续生效。"
+                    if self.operator_open_paused
+                    else "确认暂停新的策略开仓；现有持仓仍会继续自动平仓和对账。"
+                ),
+                "facts": {
+                    **facts,
+                    "目标状态": "恢复新开仓" if self.operator_open_paused else "暂停新开仓",
+                },
+            }
+        if action == "stage_config":
+            updates, error, config_facts = self._config_updates_from_dashboard(payload)
+            if error is not None or updates is None:
+                return {"allowed": False, "reason": error, "facts": config_facts}
+            account_error = self._authoritative_account_error()
+            if account_error is not None:
+                return {"allowed": False, "reason": account_error, "facts": config_facts}
+            assert account is not None
+            if (
+                abs(account.var_position) > VAR_POSITION_TOLERANCE
+                or abs(account.lighter_position) > VAR_POSITION_TOLERANCE
+                or self.transition_in_progress()
+            ):
+                return {
+                    "allowed": False,
+                    "reason": "只允许在双方空仓且没有执行中订单时保存参数",
+                    "facts": config_facts,
+                }
+            return {
+                "allowed": True,
+                "guard": guard,
+                "message": "确认写入 .env；当前进程不热更新，重启 Runtime 后生效。",
+                "facts": config_facts,
+                "updates": updates,
+            }
+        account_error = self._authoritative_account_error()
+        if action not in {"refresh_var", "reconcile"} and account_error is not None:
+            return {"allowed": False, "reason": account_error, "facts": facts}
+        if action in {
+            "force_round_close",
+            "close_var_residual",
+            "close_lighter_residual",
+        } and self.transition_in_progress():
+            return {"allowed": False, "reason": "仍有订单或对冲正在执行", "facts": facts}
+        command_connected = await self.runtime.command_broker.extension_connected()
+        if action == "force_round_close":
+            if current_open is None:
+                return {"allowed": False, "reason": "当前没有可追踪的双边持仓", "facts": facts}
+            if self.last_reconcile_outcome is not AccountReconcileOutcome.FRESH_MATCH:
+                return {"allowed": False, "reason": "强制整轮平仓前必须精确对账一致", "facts": facts}
+            if not command_connected:
+                return {"allowed": False, "reason": "Var 命令通道未连接", "facts": facts}
+            return {
+                "allowed": True,
+                "guard": guard,
+                "message": "将忽略策略收益阈值，先平 Var，再按实际成交量 reduce-only 平 Lighter。",
+                "facts": {**facts, "当前轮次": current_open.trade_key},
+            }
+        if action == "close_var_residual":
+            assert account is not None
+            if abs(account.var_position) <= VAR_POSITION_TOLERANCE:
+                return {"allowed": False, "reason": "Var 当前没有残仓", "facts": facts}
+            if abs(account.lighter_position) > VAR_POSITION_TOLERANCE:
+                return {"allowed": False, "reason": "Lighter 并非空仓，请使用强制整轮平仓", "facts": facts}
+            if current_open is None:
+                return {"allowed": False, "reason": "本地没有与 Var 残仓对应的恢复记录", "facts": facts}
+            if not command_connected:
+                return {"allowed": False, "reason": "Var 命令通道未连接", "facts": facts}
+            return {
+                "allowed": True,
+                "guard": guard,
+                "message": "仅平权威快照中的 Var 残仓，不会创建新的 Lighter 对冲。",
+                "facts": facts,
+            }
+        if action == "close_lighter_residual":
+            assert account is not None
+            if abs(account.lighter_position) <= VAR_POSITION_TOLERANCE:
+                return {"allowed": False, "reason": "Lighter 当前没有残仓", "facts": facts}
+            if abs(account.var_position) > VAR_POSITION_TOLERANCE:
+                return {"allowed": False, "reason": "Var 并非空仓，请使用强制整轮平仓", "facts": facts}
+            return {
+                "allowed": True,
+                "guard": guard,
+                "message": "提交精确数量的 Lighter reduce-only 市价 IOC，不会操作 Var。",
+                "facts": facts,
+            }
+        if action == "refresh_var":
+            if self.pending_var_intent is not None or self._auto_var_order_inflight:
+                return {"allowed": False, "reason": "Var 订单仍处于提交或确认阶段", "facts": facts}
+            return {
+                "allowed": True,
+                "guard": guard,
+                "message": "刷新前会持久化暂停新开仓，随后等待 Var 行情重新变为新鲜。",
+                "facts": facts,
+            }
+        return {
+            "allowed": True,
+            "guard": guard,
+            "message": "重新读取双方权威仓位；只有精确一致时才恢复对账类安全暂停。",
+            "facts": facts,
+        }
+
+    @staticmethod
+    def _write_dotenv_updates(path: Path, updates: dict[str, str]) -> None:
+        unknown = set(updates) - RUNTIME_DOTENV_ALLOWED_KEYS
+        if unknown:
+            raise RuntimeError(f"Refusing unknown runtime settings: {sorted(unknown)}")
+        lines = path.read_text(encoding="utf-8").splitlines()
+        pending = dict(updates)
+        output: list[str] = []
+        for line in lines:
+            stripped = line.lstrip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                output.append(line)
+                continue
+            key = stripped.split("=", 1)[0].strip()
+            if key in pending:
+                output.append(f"{key}={pending.pop(key)}")
+            else:
+                output.append(line)
+        if pending:
+            output.append("")
+            output.extend(f"{key}={value}" for key, value in pending.items())
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text("\n".join(output) + "\n", encoding="utf-8")
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                temporary.unlink()
+
+    async def _refresh_variational_page_via_cdp(self) -> None:
+        debug_origin = "http://127.0.0.1:9222"
+
+        def load_targets() -> list[dict[str, Any]]:
+            response = requests.get(f"{debug_origin}/json", timeout=3)
+            response.raise_for_status()
+            value = response.json()
+            if not isinstance(value, list):
+                raise RuntimeError("Chrome target list is malformed")
+            return [item for item in value if isinstance(item, dict)]
+
+        targets = await asyncio.to_thread(load_targets)
+        target = next(
+            (
+                item
+                for item in targets
+                if str(item.get("type") or "") == "page"
+                and "omni.variational.io" in str(item.get("url") or "")
+                and str(item.get("webSocketDebuggerUrl") or "").startswith("ws")
+            ),
+            None,
+        )
+        if target is None:
+            raise RuntimeError("未找到正在运行的 Variational 页面")
+        websocket_url = str(target["webSocketDebuggerUrl"])
+        async with websockets.connect(
+            websocket_url,
+            origin=debug_origin,
+            open_timeout=3,
+            close_timeout=1,
+            max_size=1024 * 1024,
+        ) as socket:
+            await socket.send(
+                json.dumps({"id": 1, "method": "Page.reload", "params": {}})
+            )
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                raw = await asyncio.wait_for(socket.recv(), timeout=5)
+                response = json.loads(raw)
+                if isinstance(response, dict) and response.get("id") == 1:
+                    if response.get("error"):
+                        raise RuntimeError(str(response["error"]))
+                    break
+            else:
+                raise RuntimeError("Chrome 没有确认页面刷新")
+        await asyncio.sleep(0.5)
+        deadline = time.monotonic() + READY_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            age = await self.get_variational_quote_age_ms(self.variational_ticker)
+            if age is not None and age <= self.strategy_config.max_quote_age_ms:
+                return
+            await asyncio.sleep(0.2)
+        raise RuntimeError("Var 页面刷新后，实时行情没有在 60 秒内恢复")
+
+    async def execute_operations_action(
+        self,
+        action: str,
+        payload: dict[str, Any],
+        preview: dict[str, Any],
+    ) -> dict[str, Any]:
+        expected_guard = str(preview.get("guard") or "")
+        async with self._operator_action_lock:
+            if expected_guard != await self._operator_state_guard():
+                return {"ok": False, "error": "账户或执行状态已变化，请重新确认"}
+            self._operator_action_inflight = True
+            try:
+                if action == "pause_open":
+                    self.operator_open_paused = not self.operator_open_paused
+                    await self.persist_runtime_state()
+                    return {
+                        "ok": True,
+                        "message": (
+                            "已暂停新的策略开仓，平仓和对账继续运行。"
+                            if self.operator_open_paused
+                            else "已恢复新开仓许可，所有策略与风控门槛继续生效。"
+                        ),
+                    }
+                if action == "stage_config":
+                    updates = preview.get("updates")
+                    if not isinstance(updates, dict):
+                        return {"ok": False, "error": "参数确认数据已失效"}
+                    await asyncio.to_thread(
+                        self._write_dotenv_updates,
+                        DOTENV_FILE,
+                        {str(key): str(value) for key, value in updates.items()},
+                    )
+                    return {"ok": True, "message": "参数已安全写入 .env，重启 Runtime 后生效。"}
+                if action == "reconcile":
+                    matched = await self.reconcile_accounts(allow_resume=True)
+                    return {
+                        "ok": matched,
+                        "message": (
+                            "双方账户已精确对账。"
+                            if matched
+                            else f"对账未通过：{self.last_reconcile_status}"
+                        ),
+                        "error": None if matched else self.last_reconcile_status,
+                    }
+                self.operator_open_paused = True
+                await self.persist_runtime_state()
+                current_open = await self._current_open_record()
+                if action == "force_round_close":
+                    if current_open is None:
+                        return {"ok": False, "error": "当前持仓已变化"}
+                    submitted = await self.emergency_flatten_var(current_open)
+                    if not submitted:
+                        detail = str(self.automation_pause_reason or "").strip()
+                        return {
+                            "ok": False,
+                            "error": (
+                                detail
+                                if detail and detail != "-"
+                                else "Var 强制平仓未被交易通道受理"
+                            ),
+                        }
+                    return {"ok": True, "message": "强制整轮平仓已提交，等待双方成交和权威对账。"}
+                if action == "close_var_residual":
+                    if current_open is None:
+                        return {"ok": False, "error": "Var 残仓恢复记录已变化"}
+                    submitted = await self.emergency_flatten_var(
+                        current_open,
+                        intent_phase="operator_var_only_close",
+                    )
+                    if not submitted:
+                        detail = str(self.automation_pause_reason or "").strip()
+                        return {
+                            "ok": False,
+                            "error": (
+                                detail
+                                if detail and detail != "-"
+                                else "Var 单边残仓平仓未被交易通道受理"
+                            ),
+                        }
+                    return {"ok": True, "message": "Var 单边残仓平仓已提交，未创建 Lighter 对冲。"}
+                if action == "close_lighter_residual":
+                    account = self.last_account_snapshot
+                    if account is None:
+                        return {"ok": False, "error": "权威账户快照已丢失"}
+                    qty = abs(account.lighter_position)
+                    side = "buy" if account.lighter_position > 0 else "sell"
+                    key = f"operator-lighter-close:{uuid.uuid4().hex}"
+                    record = OrderLifecycle(
+                        trade_key=key,
+                        trade_id=key,
+                        side=side,
+                        qty=qty,
+                        asset=(self.variational_ticker or "BTC").upper(),
+                        auto_hedge_enabled=True,
+                        last_variational_status="operator_lighter_only_close",
+                        var_fill_source="operator_lighter_only_close",
+                        var_event_origin=VarEventOrigin.MANUAL_LIVE.value,
+                        strategy_phase="operator_lighter_only_close",
+                        strategy_tag=MANUAL_STRATEGY_TAG,
+                        lighter_target_qty_override=qty,
+                        lighter_reduce_only=True,
+                        trace_id=new_trace_id(),
+                        execution_state=EXECUTION_STATE_RECOVERY_REQUIRED,
+                    )
+                    async with self._record_lock:
+                        self.records[key] = record
+                        self.record_order.append(key)
+                    await self.persist_runtime_state()
+                    if not self.schedule_lighter_order(record):
+                        return {"ok": False, "error": "Lighter 残仓平仓任务未能调度"}
+                    return {"ok": True, "message": "Lighter reduce-only 残仓平仓已提交，等待成交确认。"}
+                if action == "refresh_var":
+                    await self._refresh_variational_page_via_cdp()
+                    return {"ok": True, "message": "Var 页面已刷新，实时行情已恢复；新开仓仍保持暂停。"}
+                return {"ok": False, "error": "未知操作"}
+            finally:
+                self._operator_action_inflight = False
 
     async def render_dashboard(self) -> Group:
         is_zh = self.args.lang == "zh"
@@ -11929,6 +12630,22 @@ class VariationalToLighterRuntime:
         self.setup_signal_handlers()
         self.var_event_accept_after = datetime.now(timezone.utc)
         await self.runtime.start()
+        if self.operations_dashboard_enabled:
+            self.operations_dashboard_server = OperationsDashboardServer(
+                snapshot_factory=self.operations_dashboard_snapshot,
+                action_preparer=self.prepare_operations_action,
+                action_executor=self.execute_operations_action,
+                asset_dir=OPERATIONS_DASHBOARD_ASSET_DIR,
+                host=OPERATIONS_DASHBOARD_HOST,
+                port=self.operations_dashboard_port,
+                refresh_seconds=self.strategy_config.dashboard_refresh_seconds,
+            )
+            await self.operations_dashboard_server.start()
+            self.logger.info(
+                "Operations dashboard listening on loopback only: http://%s:%s",
+                OPERATIONS_DASHBOARD_HOST,
+                self.operations_dashboard_port,
+            )
         self.print_startup_next_steps()
         self.logger.info(
             "Listening for Variational forwarder events on ws://%s:%s and ws://%s:%s; command broker ws://%s:%s",
@@ -12016,6 +12733,10 @@ class VariationalToLighterRuntime:
 
     async def close(self) -> None:
         self.stop_flag = True
+
+        if self.operations_dashboard_server is not None:
+            await self.operations_dashboard_server.stop()
+            self.operations_dashboard_server = None
 
         if self.dashboard_task and not self.dashboard_task.done():
             self.dashboard_task.cancel()

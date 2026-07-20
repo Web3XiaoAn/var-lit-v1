@@ -378,7 +378,7 @@ class DashboardCalculationTests(unittest.TestCase):
                 load_runtime_env(dotenv_path)
 
             dotenv_path.write_text(
-                content + "\nSTRATEGY_MAX_QUOTE_AGE_MS=500\n",
+                content + "\nSTRATEGY_UNKNOWN_OPTION=500\n",
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(RuntimeError, "Unsupported .env keys"):
