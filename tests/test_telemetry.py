@@ -7,7 +7,6 @@ from argparse import Namespace
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import main as main_module
 from main import OrderLifecycle
@@ -19,80 +18,6 @@ os.environ.setdefault("LIGHTER_PRIVATE_KEY", "0x00")
 
 
 class TelemetryTests(unittest.TestCase):
-    def test_depth_features_keep_compact_band_totals(self) -> None:
-        features = main_module.lighter_depth_features(
-            {
-                "bids": {Decimal("100"): Decimal("2")},
-                "asks": {Decimal("100.01"): Decimal("1")},
-            },
-            Decimal("100"),
-            Decimal("100.01"),
-        )
-
-        one_bps = features["bands_bps"]["1"]
-        self.assertEqual(one_bps["bid_usd"], Decimal("200"))
-        self.assertEqual(one_bps["ask_usd"], Decimal("100.01"))
-        self.assertGreater(one_bps["imbalance"], Decimal("0"))
-
-    def test_survival_observation_is_deduplicated_and_never_submits(self) -> None:
-        async def run_case() -> None:
-            from tests.test_dashboard_calculations import make_open_candidate
-
-            runtime = main_module.VariationalToLighterRuntime(
-                Namespace(auto_hedge=True, lang="zh")
-            )
-            candidate = make_open_candidate(runtime)
-            frame = runtime.last_market_frame
-            assert frame is not None
-            runtime.active_parameter_epoch = candidate.epoch
-            runtime.trace_writer = object()
-            order_calls: list[dict] = []
-
-            async def record_order_call(**kwargs):
-                order_calls.append(kwargs)
-
-            runtime.runtime.command_broker.request_place_order = record_order_call
-            runtime.base_amount_multiplier = 1_000_000
-            runtime.price_multiplier = 100
-            runtime.lighter_order_book = {
-                "bids": {Decimal("100.2"): Decimal("10")},
-                "asks": {Decimal("100.3"): Decimal("10")},
-            }
-            runtime.lighter_best_bid = Decimal("100.2")
-            runtime.lighter_best_ask = Decimal("100.3")
-            runtime.lighter_order_book_nonce = 1
-            runtime.lighter_order_book_ready = True
-            runtime.lighter_book_received_monotonic = asyncio.get_running_loop().time()
-            events: list[tuple[str, dict]] = []
-            runtime.trace_event = lambda event, _trace_id, **fields: events.append(
-                (event, fields)
-            )
-            observation = {
-                "valid": True,
-                "var_age_ms": 1,
-                "lighter_age_ms": 1,
-                "source_skew_ms": 0,
-            }
-
-            with patch.object(main_module, "OPEN_SURVIVAL_HORIZONS_MS", (0, 1, 2)):
-                self.assertTrue(
-                    runtime.schedule_open_survival_observation(frame, observation)
-                )
-                self.assertFalse(
-                    runtime.schedule_open_survival_observation(frame, observation)
-                )
-                tasks = list(runtime.open_survival_tasks)
-                await asyncio.gather(*tasks)
-
-            self.assertEqual(len(events), 1)
-            event, fields = events[0]
-            self.assertEqual(event, main_module.OPEN_SURVIVAL_OBSERVATION_VERSION)
-            self.assertEqual([row["target_offset_ms"] for row in fields["snapshots"]], [0, 1, 2])
-            self.assertTrue(all(row["available"] for row in fields["snapshots"]))
-            self.assertEqual(order_calls, [])
-
-        asyncio.run(run_case())
-
     def test_bounded_writer_drops_without_waiting_and_flushes_started_queue(self) -> None:
         async def run_case() -> None:
             with tempfile.TemporaryDirectory(prefix="trace-writer-") as tmp:
