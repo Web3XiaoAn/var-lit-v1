@@ -239,6 +239,50 @@ class OperationsRuntimeTests(unittest.TestCase):
 
         asyncio.run(run_case())
 
+    def test_scheduled_var_refresh_blocks_orders_only_while_refreshing(self) -> None:
+        async def run_case() -> None:
+            runtime = TrackingRuntime()
+            runtime.automation_ready = True
+
+            async def refresh() -> None:
+                self.assertTrue(runtime._variational_refresh_in_progress)
+                self.assertFalse(
+                    runtime.automation_can_submit_var_order(
+                        "last_auto_var_order_status"
+                    )
+                )
+
+            with patch.object(
+                runtime,
+                "_refresh_variational_page_via_cdp",
+                side_effect=refresh,
+            ) as mocked:
+                await runtime.refresh_variational_page_when_safe()
+
+            mocked.assert_awaited_once()
+            self.assertFalse(runtime._variational_refresh_in_progress)
+            self.assertTrue(
+                runtime.automation_can_submit_var_order(
+                    "last_auto_var_order_status"
+                )
+            )
+
+        asyncio.run(run_case())
+
+    def test_scheduled_var_refresh_clears_guard_after_failure(self) -> None:
+        async def run_case() -> None:
+            runtime = TrackingRuntime()
+            with patch.object(
+                runtime,
+                "_refresh_variational_page_via_cdp",
+                AsyncMock(side_effect=RuntimeError("refresh failed")),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "refresh failed"):
+                    await runtime.refresh_variational_page_when_safe()
+            self.assertFalse(runtime._variational_refresh_in_progress)
+
+        asyncio.run(run_case())
+
     def test_lighter_only_action_creates_exact_reduce_only_recovery(self) -> None:
         async def run_case() -> None:
             runtime = TrackingRuntime()

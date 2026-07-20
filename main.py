@@ -123,6 +123,8 @@ RUNTIME_BUILD = "var-lit-v1"
 EXECUTION_SAMPLE_VERSION = "2026-07-15-adaptive-median-v4-live2"
 SETTLED_EXECUTION_HISTORY_LIMIT = 100
 READY_TIMEOUT_SECONDS = 60.0
+VARIATIONAL_PAGE_REFRESH_SECONDS = 6 * 60 * 60
+VARIATIONAL_PAGE_REFRESH_RETRY_SECONDS = 10 * 60
 POLL_INTERVAL_SECONDS = 0.05
 EVENT_SIGNAL_FALLBACK_SECONDS = 1.0
 STRATEGY_SAMPLE_SECONDS = 1.0
@@ -2223,6 +2225,8 @@ class VariationalToLighterRuntime:
         self._strategy_history_resume_coverage_ms = 0
         self._strategy_history_resume_gap_ms: int | None = None
         self.strategy_sample_task: asyncio.Task[None] | None = None
+        self.variational_refresh_task: asyncio.Task[None] | None = None
+        self._variational_refresh_in_progress = False
         self.open_survival_session_id = f"survival-{uuid.uuid4().hex}"
         self._last_open_survival_key: tuple[Any, ...] | None = None
         self.open_survival_tasks: set[asyncio.Task[None]] = set()
@@ -5430,6 +5434,9 @@ class VariationalToLighterRuntime:
         )
         if self.automation_paused:
             return False
+        if self._variational_refresh_in_progress:
+            setattr(self, status_target, "refreshing Variational page")
+            return False
         if self._asset_switch_in_progress:
             setattr(self, status_target, "switching market")
             return False
@@ -5467,6 +5474,8 @@ class VariationalToLighterRuntime:
             return "automatic Lighter hedge is disabled"
         if self.operator_open_paused:
             return "new opens are paused by operator"
+        if self._variational_refresh_in_progress:
+            return "scheduled Variational page refresh is in progress"
         if self.automation_paused:
             self._canary_session_state = CANARY_SESSION_HALTED
             return "automation is paused"
@@ -12041,6 +12050,14 @@ class VariationalToLighterRuntime:
 
     async def _refresh_variational_page_via_cdp(self) -> None:
         debug_origin = "http://127.0.0.1:9222"
+        state_before = await self.runtime.monitor.get_trading_state()
+        quote_before = state_before.get("quote")
+        quote_received_before = (
+            quote_before.get("received_monotonic")
+            if isinstance(quote_before, dict)
+            else None
+        )
+        heartbeat_before = state_before.get("last_heartbeat_iso")
 
         def load_targets() -> list[dict[str, Any]]:
             response = requests.get(f"{debug_origin}/json", timeout=3)
@@ -12087,11 +12104,60 @@ class VariationalToLighterRuntime:
         await asyncio.sleep(0.5)
         deadline = time.monotonic() + READY_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
-            age = await self.get_variational_quote_age_ms(self.variational_ticker)
-            if age is not None and age <= self.strategy_config.max_quote_age_ms:
+            state = await self.runtime.monitor.get_trading_state()
+            quote = state.get("quote")
+            quote_received = (
+                quote.get("received_monotonic")
+                if isinstance(quote, dict)
+                else None
+            )
+            new_quote = (
+                quote_received is not None
+                and (
+                    quote_received_before is None
+                    or quote_received > quote_received_before
+                )
+            )
+            new_heartbeat = (
+                state.get("last_heartbeat_iso") is not None
+                and state.get("last_heartbeat_iso") != heartbeat_before
+                and (state.get("heartbeat_age") or 0) <= HEARTBEAT_STALE_SECONDS
+            )
+            command_connected = (
+                await self.runtime.command_broker.extension_connected()
+            )
+            if new_quote and new_heartbeat and command_connected:
                 return
             await asyncio.sleep(0.2)
-        raise RuntimeError("Var 页面刷新后，实时行情没有在 60 秒内恢复")
+        raise RuntimeError("Var 页面刷新后，三条扩展通道没有在 60 秒内恢复")
+
+    async def refresh_variational_page_when_safe(self) -> None:
+        self._variational_refresh_in_progress = True
+        try:
+            while not self.stop_flag and self.transition_in_progress():
+                await asyncio.sleep(0.25)
+            if self.stop_flag:
+                return
+            await self._refresh_variational_page_via_cdp()
+        finally:
+            self._variational_refresh_in_progress = False
+
+    async def variational_page_refresh_loop(self) -> None:
+        delay = VARIATIONAL_PAGE_REFRESH_SECONDS
+        while not self.stop_flag:
+            await asyncio.sleep(delay)
+            if self.stop_flag:
+                return
+            try:
+                await self.refresh_variational_page_when_safe()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                delay = VARIATIONAL_PAGE_REFRESH_RETRY_SECONDS
+                self.logger.warning("Scheduled Variational page refresh failed: %s", exc)
+            else:
+                delay = VARIATIONAL_PAGE_REFRESH_SECONDS
+                self.logger.info("Scheduled Variational page refresh completed")
 
     async def execute_operations_action(
         self,
@@ -13025,6 +13091,7 @@ class VariationalToLighterRuntime:
             "reconcile": self.reconcile_task,
             "Lighter-order-watchdog": self.lighter_order_watchdog_task,
             "Var-intent-watchdog": self.var_intent_watchdog_task,
+            "Variational-page-refresh": self.variational_refresh_task,
             "dashboard": self.dashboard_task,
         }
         for name, task in supervised.items():
@@ -13154,6 +13221,10 @@ class VariationalToLighterRuntime:
         self.reconcile_task = asyncio.create_task(self.reconcile_loop())
         self.lighter_order_watchdog_task = asyncio.create_task(self.lighter_order_watchdog_loop())
         self.var_intent_watchdog_task = asyncio.create_task(self.var_intent_watchdog_loop())
+        self.variational_refresh_task = asyncio.create_task(
+            self.variational_page_refresh_loop(),
+            name="variational-page-refresh",
+        )
         if getattr(self.args, "dashboard", True):
             self.dashboard_task = asyncio.create_task(
                 self.dashboard_loop(), name="terminal-dashboard"
@@ -13197,6 +13268,13 @@ class VariationalToLighterRuntime:
                 task.cancel()
             await asyncio.gather(*self.open_survival_tasks, return_exceptions=True)
             self.open_survival_tasks.clear()
+
+        if self.variational_refresh_task and not self.variational_refresh_task.done():
+            self.variational_refresh_task.cancel()
+            await asyncio.gather(
+                self.variational_refresh_task,
+                return_exceptions=True,
+            )
 
         if self.reconcile_task and not self.reconcile_task.done():
             self.reconcile_task.cancel()
