@@ -150,6 +150,7 @@ def open_candidate_from_payload(payload: Mapping[str, Any] | None) -> OpenCandid
         "adaptive-median-v3",
         "adaptive-median-v4",
         "adaptive-median-v5",
+        "adaptive-median-v6",
     }:
         return None
     try:

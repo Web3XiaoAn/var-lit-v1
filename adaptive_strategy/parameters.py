@@ -20,6 +20,10 @@ from .models import (
 
 
 BPS = Decimal("0.0001")
+EPOCH_PREFIXES = {
+    f"adaptive-median-v{version}": f"ame{version}"
+    for version in range(1, 7)
+}
 # A finite sentinel keeps all serialized/validated financial values finite.
 # Rates can never approach this value in a valid market frame.
 NO_BALANCE_THRESHOLD = Decimal("-1000000000")
@@ -63,9 +67,10 @@ def compile_entry_opportunity(
 
     V1/V2 retain their sealed weighted-Q80 behavior. V3 requires the quote to
     exceed every live window median plus its sealed volatility cushion. V4
-    deliberately uses only a small fixed margin. V5 keeps the same gate shape
-    but lets the cushion rise modestly with 30m MAD. Execution-quality history
-    and directional balancing remain diagnostics.
+    deliberately uses only a small fixed margin. V5 adapts that margin to 30m
+    MAD. V6 estimates a target upper quantile from each window's empirical
+    median-to-Q80 span, so the adjustment belongs to the market distribution
+    rather than a second execution gate.
     """
 
     five, thirty, hourly = _windows(stats)
@@ -73,8 +78,22 @@ def compile_entry_opportunity(
         "adaptive-median-v3",
         "adaptive-median-v4",
         "adaptive-median-v5",
+        "adaptive-median-v6",
     }:
         return compile_q80(stats, model)
+    if model.model_version == "adaptive-median-v6":
+        quantile_fraction = (
+            Decimal(model.entry_quantile_pct - 50) / Decimal("30")
+        )
+        upper_spread = (
+            model.weight_5m * (five.q80 - five.median)
+            + model.weight_30m * (thirty.q80 - thirty.median)
+            + model.weight_1h * (hourly.q80 - hourly.median)
+        )
+        return (
+            max(five.median, thirty.median, hourly.median)
+            + quantile_fraction * upper_spread
+        )
     margin = (
         model.entry_median_margin_bps * BPS
         if model.model_version == "adaptive-median-v4"
@@ -104,7 +123,7 @@ def compile_exit_opportunity(
         raise ValueError("unsupported exit opportunity quantile")
     values = (five.q95, thirty.q95, hourly.q95)
     if any(value is None for value in values):
-        raise ValueError("Q95 is required for adaptive-median-v2/v3/v4/v5")
+        raise ValueError("Q95 is required for adaptive-median-v2/v3/v4/v5/v6")
     return (
         model.weight_5m * values[0]
         + model.weight_30m * values[1]
@@ -233,7 +252,11 @@ def _component(
         wear_bps=wear_bps,
         reserve_bps_per_leg=reserve_bps_per_leg,
     )
-    if model.model_version in {"adaptive-median-v4", "adaptive-median-v5"}:
+    if model.model_version in {
+        "adaptive-median-v4",
+        "adaptive-median-v5",
+        "adaptive-median-v6",
+    }:
         final = entry_opportunity
     elif model.model_version == "adaptive-median-v3":
         final = max(entry_opportunity, balance)
@@ -320,23 +343,7 @@ def build_parameter_candidate(
         for minutes in (5, 30, 60)
     }
     return ParameterEpoch(
-        epoch_id=(
-            "ame5-"
-            if model.model_version == "adaptive-median-v5"
-            else (
-                "ame4-"
-                if model.model_version == "adaptive-median-v4"
-                else (
-                    "ame3-"
-                    if model.model_version == "adaptive-median-v3"
-                    else (
-                        "ame2-"
-                        if model.model_version == "adaptive-median-v2"
-                        else "ame1-"
-                    )
-                )
-            )
-        ) + identity,
+        epoch_id=f"{EPOCH_PREFIXES[model.model_version]}-{identity}",
         model_version=model.model_version,
         model_hash=model.model_hash,
         config_hash=config_hash,
@@ -420,23 +427,7 @@ def _activated_epoch_id(
         f"{key}={int(value)}" for key, value in sorted(proposal.readiness.items())
     )
     identity = hashlib.sha256("|".join(fields).encode("utf-8")).hexdigest()[:16]
-    prefix = (
-        "ame5"
-        if proposal.model_version == "adaptive-median-v5"
-        else (
-            "ame4"
-            if proposal.model_version == "adaptive-median-v4"
-            else (
-                "ame3"
-                if proposal.model_version == "adaptive-median-v3"
-                else (
-                    "ame2"
-                    if proposal.model_version == "adaptive-median-v2"
-                    else "ame1"
-                )
-            )
-        )
-    )
+    prefix = EPOCH_PREFIXES[proposal.model_version]
     return f"{prefix}-{identity}"
 
 
@@ -468,7 +459,7 @@ class EpochActivator:
             # The runtime only offers a proposal after all formal 5m/30m/1h
             # windows are complete.  Activate that first fully-qualified hour
             # immediately; later changes follow the configured confirmation
-            # count (production v3/v4/v5 use one cold-path proposal).
+            # count (production v3/v4/v5/v6 use one cold-path proposal).
             thresholds = proposal.thresholds
             expires_at_ms = max(
                 proposal.expires_at_ms,
@@ -534,6 +525,7 @@ class EpochActivator:
             "adaptive-median-v3",
             "adaptive-median-v4",
             "adaptive-median-v5",
+            "adaptive-median-v6",
         }:
             # Upward protection must never be smoothed below the newly
             # confirmed three-window gate.  Downward changes may still move

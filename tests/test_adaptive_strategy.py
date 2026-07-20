@@ -38,6 +38,7 @@ MODEL_V2_PATH = ROOT / "adaptive_strategy" / "models" / "adaptive-median-v2.json
 MODEL_V3_PATH = ROOT / "adaptive_strategy" / "models" / "adaptive-median-v3.json"
 MODEL_V4_PATH = ROOT / "adaptive_strategy" / "models" / "adaptive-median-v4.json"
 MODEL_V5_PATH = ROOT / "adaptive_strategy" / "models" / "adaptive-median-v5.json"
+MODEL_V6_PATH = ROOT / "adaptive_strategy" / "models" / "adaptive-median-v6.json"
 D = Decimal
 MODEL = load_model_config(MODEL_PATH)
 
@@ -203,6 +204,30 @@ def test_v5_uses_adaptive_mad_cushion_and_keeps_balance_diagnostic():
             },
         )
         assert epoch.epoch_id.startswith("ame5-")
+        assert epoch.component(side).final == expected
+
+
+def test_v6_uses_weighted_empirical_entry_quantile():
+    model = load_model_config(MODEL_V6_PATH)
+    assert model.entry_quantile_pct == 58
+    assert model.entry_median_margin_bps == D("0")
+    assert model.entry_mad_multiplier_30m == D("0")
+    fraction = D("8") / D("30")
+    for side in Side:
+        stats = model.calibration_stats[side]
+        spread = (
+            model.weight_5m * (stats[5].q80 - stats[5].median)
+            + model.weight_30m * (stats[30].q80 - stats[30].median)
+            + model.weight_1h * (stats[60].q80 - stats[60].median)
+        )
+        expected = max(
+            stats[5].median,
+            stats[30].median,
+            stats[60].median,
+        ) + fraction * spread
+        assert compile_entry_opportunity(stats, model) == expected
+        epoch = candidate(model)
+        assert epoch.epoch_id.startswith("ame6-")
         assert epoch.component(side).final == expected
 
 

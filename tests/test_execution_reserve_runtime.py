@@ -64,7 +64,7 @@ class ExecutionReserveRuntimeTests(unittest.TestCase):
                     {Decimal("128")},
                 )
 
-    def test_execution_reports_remain_diagnostic_with_fixed_small_entry_margin(self) -> None:
+    def test_execution_reports_remain_diagnostic_and_do_not_raise_entry_gate(self) -> None:
         runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
         runtime.variational_ticker = "BTC"
         captured_at = datetime.now(timezone.utc).isoformat()
@@ -90,15 +90,15 @@ class ExecutionReserveRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.provisional_phase_reserve_usd(Decimal("1000")), Decimal("0.10"))
         self.assertEqual(
             runtime.effective_open_execution_headroom_bps("BUY", Decimal("200")),
-            Decimal("0.25"),
+            Decimal("0"),
         )
         self.assertEqual(
             runtime.effective_open_execution_headroom_bps("BUY", Decimal("1000")),
-            Decimal("0.25"),
+            Decimal("0"),
         )
         self.assertEqual(
             runtime.effective_open_execution_headroom_bps("SELL", Decimal("200")),
-            Decimal("0.25"),
+            Decimal("0"),
         )
         self.assertEqual(
             runtime.firm_open_execution_reserve_usd(Decimal("200")),
@@ -135,7 +135,7 @@ class ExecutionReserveRuntimeTests(unittest.TestCase):
             "SELL", Decimal("200")
         )
 
-        self.assertEqual(headroom, Decimal("0.25"))
+        self.assertEqual(headroom, Decimal("0"))
 
     def test_persistent_tail_samples_do_not_raise_open_gate(self) -> None:
         runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
@@ -155,7 +155,7 @@ class ExecutionReserveRuntimeTests(unittest.TestCase):
 
         self.assertEqual(
             runtime.effective_open_execution_headroom_bps("BUY", Decimal("200")),
-            Decimal("0.25"),
+            Decimal("0"),
         )
 
     def test_firm_amount_tolerance_keeps_target_notional_sample_bucket(self) -> None:
@@ -180,7 +180,7 @@ class ExecutionReserveRuntimeTests(unittest.TestCase):
                 Decimal("127.50"),
                 sample_notional_usd=Decimal("128"),
             ),
-            Decimal("0.25"),
+            Decimal("0"),
         )
 
     def test_capture_records_signed_loss_with_actual_matched_notional(self) -> None:

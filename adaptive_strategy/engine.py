@@ -99,7 +99,11 @@ class StrategyEngine:
     ) -> str | None:
         """Return the single authoritative dynamic-threshold admission result."""
 
-        if model_version not in {"adaptive-median-v4", "adaptive-median-v5"}:
+        if model_version not in {
+            "adaptive-median-v4",
+            "adaptive-median-v5",
+            "adaptive-median-v6",
+        }:
             return None
         if side is Side.BUY:
             return (
@@ -164,6 +168,7 @@ class StrategyEngine:
                     "adaptive-median-v3",
                     "adaptive-median-v4",
                     "adaptive-median-v5",
+                    "adaptive-median-v6",
                 }
                 else opposite_component.baseline
             )
@@ -179,7 +184,7 @@ class StrategyEngine:
             )
             score = (reference_rate - component.final) / max(component.mad_30m, self.epsilon)
             if (
-                epoch.model_version == "adaptive-median-v5"
+                epoch.model_version in {"adaptive-median-v5", "adaptive-median-v6"}
                 and score > V5_MAX_STANDARDIZED_EXCESS
             ):
                 continue
@@ -262,7 +267,7 @@ class StrategyEngine:
         if reference_rate < candidate.threshold:
             return Decision(Action.NO_ACTION, "firm_reference_rate_below_frozen_threshold")
         if (
-            epoch.model_version == "adaptive-median-v5"
+            epoch.model_version in {"adaptive-median-v5", "adaptive-median-v6"}
             and (
                 reference_rate - candidate.threshold
             ) / max(epoch.component(candidate.direction).mad_30m, self.epsilon)
@@ -280,6 +285,7 @@ class StrategyEngine:
                 "adaptive-median-v3",
                 "adaptive-median-v4",
                 "adaptive-median-v5",
+                "adaptive-median-v6",
             }
             else opposite_component.baseline
         )
@@ -293,6 +299,7 @@ class StrategyEngine:
                 "adaptive-median-v3",
                 "adaptive-median-v4",
                 "adaptive-median-v5",
+                "adaptive-median-v6",
             }
             and lower_bound < -_wear_usd(epoch, firm_notional_usd)
         ):

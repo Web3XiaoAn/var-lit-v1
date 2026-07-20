@@ -23,8 +23,8 @@ Var-Lit V1 是 Variational 与 Lighter 之间的 BTC 双边执行程序。这是
 - 仅监听回环地址、通过 SSH 隧道访问的 200ms 实时网页运维面板。
 - 可选 SQLite 研究库；服务器默认关闭，只保留约一小时的滚动运行数据。
 
-内部策略状态标识仍为 `adaptive-median-v5`。它是已有实盘状态和模型文件的兼容标识，
-不代表公开产品已经发布过五版，也不能在不迁移状态的情况下改名。公开产品、运行时、
+内部策略状态标识为 `adaptive-median-v6`。它是版本化公式和冻结持仓上下文的内部标识，
+不代表公开产品已经发布过六版，也不能在不迁移状态的情况下改名。公开产品、运行时、
 扩展和部署服务均从 Var-Lit V1 开始计版。
 
 ## 目录
@@ -216,4 +216,4 @@ venv/bin/python tools/profile_process_resources.py \
 性能分析工具只读取外部运行目录，不连接交易所，也不进入实盘进程。部署验收重点比较
 Variational Quote、Firm、Commit 以及 Commit 到 Lighter 发送/成交的 P50/P95/P99。
 
-当前策略公式和执行保护详见 [`docs/ADAPTIVE_MEDIAN_V5.md`](docs/ADAPTIVE_MEDIAN_V5.md)。
+当前策略公式和执行保护详见 [`docs/ADAPTIVE_MEDIAN_V6.md`](docs/ADAPTIVE_MEDIAN_V6.md)。

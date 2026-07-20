@@ -325,6 +325,7 @@ class PositionContext:
             "adaptive-median-v3",
             "adaptive-median-v4",
             "adaptive-median-v5",
+            "adaptive-median-v6",
             "manual",
         }:
             raise ValueError("unsupported strategy_tag")

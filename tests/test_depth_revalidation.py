@@ -202,7 +202,7 @@ class DepthRevalidationTests(unittest.TestCase):
 
         asyncio.run(run_case())
 
-    def test_normal_strategy_close_retries_guard_without_market_fallback(self):
+    def test_normal_strategy_close_recovers_after_protected_retries_without_pause(self):
         async def run_case():
             runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
             runtime.base_amount_multiplier = 1_000
@@ -221,21 +221,37 @@ class DepthRevalidationTests(unittest.TestCase):
                 lighter_reduce_only=True,
             )
             attempts = 0
+            submitted_prices = []
 
-            async def reject_snapshot(**_kwargs):
+            async def snapshot(**kwargs):
                 nonlocal attempts
+                if kwargs.get("force_reduce_only_recovery"):
+                    return (
+                        main_module.LighterHedgeDispatchSnapshot(
+                            market_generation=runtime.market_generation,
+                            market_index=runtime.lighter_market_index,
+                            base_amount=1_000,
+                            price_i=20_000,
+                            marginal_price_i=10_100,
+                            economic_limit_price_i=None,
+                            order_book_nonce=1,
+                            quote_age_ms=0,
+                        ),
+                        None,
+                    )
                 attempts += 1
                 return None, "protected IOC price unavailable"
 
             async def persist_noop():
                 return None
 
-            async def unexpected_submit(**_kwargs):
-                raise AssertionError("guarded close must not fall back to market")
+            async def submit(**kwargs):
+                submitted_prices.append(kwargs["price"])
+                return type("Receipt", (), {"code": 0, "tx_hash": "recovery"})(), None
 
-            runtime.capture_lighter_hedge_dispatch_snapshot = reject_snapshot
+            runtime.capture_lighter_hedge_dispatch_snapshot = snapshot
             runtime.persist_runtime_state = persist_noop
-            runtime.submit_lighter_create_order = unexpected_submit
+            runtime.submit_lighter_create_order = submit
 
             await runtime._run_lighter_order_task(normal_close)
 
@@ -243,8 +259,9 @@ class DepthRevalidationTests(unittest.TestCase):
                 attempts,
                 runtime.strategy_config.lighter_hedge_max_attempts,
             )
-            self.assertEqual(normal_close.hedge_status, "error")
-            self.assertTrue(runtime.automation_paused)
+            self.assertEqual(submitted_prices, [20_000])
+            self.assertEqual(normal_close.hedge_status, "submitted")
+            self.assertFalse(runtime.automation_paused)
 
         asyncio.run(run_case())
 

@@ -92,7 +92,7 @@ def make_open_candidate(runtime: VariationalToLighterRuntime, *, now_ms: int | N
     clock = SourceClock(captured_at_ms, captured_at_ms, 0)
     buy_rate = epoch.thresholds.buy.final + (
         Decimal("2") * epoch.thresholds.buy.mad_30m
-        if epoch.model_version == "adaptive-median-v5"
+        if epoch.model_version in {"adaptive-median-v5", "adaptive-median-v6"}
         else Decimal("0.001")
     )
     sell_rate = epoch.thresholds.sell.final - Decimal("0.001")

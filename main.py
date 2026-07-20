@@ -104,7 +104,7 @@ TRACE_FILE_NAME = "execution_trace.jsonl"
 STRATEGY_MARKET_SAMPLES_FILE_NAME = "strategy_market_samples.jsonl"
 STRATEGY_SAMPLE_SESSION_FILE_NAME = "current_strategy_sample_session.json"
 STRATEGY_MARKET_SAMPLE_VERSION = "adaptive-market-sample-v1"
-ADAPTIVE_MODEL_FILE = Path(__file__).resolve().parent / "adaptive_strategy" / "models" / "adaptive-median-v5.json"
+ADAPTIVE_MODEL_FILE = Path(__file__).resolve().parent / "adaptive_strategy" / "models" / "adaptive-median-v6.json"
 RESEARCH_DATABASE_FILE = (
     Path(__file__).resolve().parent
     / "research_data"
@@ -149,7 +149,7 @@ DEFAULT_MAX_HOLD_SECONDS = 2 * 60 * 60
 DEFAULT_MAX_QUOTE_AGE_MS = 600
 DEFAULT_ROUND_COOLDOWN_SECONDS = 30
 DEFAULT_VAR_ORDER_RESULT_TIMEOUT_MS = 5000
-ADAPTIVE_MODEL_VERSION = "adaptive-median-v5"
+ADAPTIVE_MODEL_VERSION = "adaptive-median-v6"
 MIGRATABLE_FLAT_V4_MODEL_HASHES = frozenset(
     {
         # v4 audit1: the signal gate still included MAD, balance and learned
@@ -169,8 +169,6 @@ V5_OPEN_RATE_RANGE_BPS = Decimal("3.0")
 V5_CLOSE_RATE_RANGE_BPS = Decimal("4.0")
 V5_RATE_RANGE_WINDOW_MS = 5_000
 V5_CLOSE_RANGE_MAX_DEFERRAL_MS = 2_000
-OPEN_SIGNAL_EXECUTION_HEADROOM_BPS = Decimal("0.25")
-MAX_CONSECUTIVE_ROUND_WEAR_BREACHES = 2
 GUARDED_CLOSE_RETRY_DELAY_SECONDS = 0.25
 LIGHTER_WS_URL = "wss://mainnet.zklighter.elliot.ai/stream"
 LIGHTER_WS_PING_INTERVAL_SECONDS = 30
@@ -2278,7 +2276,6 @@ class VariationalToLighterRuntime:
         self._canary_round_count = 0
         self._canary_cumulative_loss_usd = Decimal("0")
         self._canary_consecutive_losses = 0
-        self._consecutive_round_wear_breaches = 0
         self._canary_completed_close_keys: set[str] = set()
         self._round_cooldown_close_keys: set[str] = set()
         self._canary_session_state = CANARY_SESSION_OBSERVING
@@ -2411,9 +2408,6 @@ class VariationalToLighterRuntime:
                             self._canary_cumulative_loss_usd
                         ),
                         "consecutive_losses": self._canary_consecutive_losses,
-                        "consecutive_wear_breaches": (
-                            self._consecutive_round_wear_breaches
-                        ),
                         "state": self._canary_session_state,
                     },
                     "automation_paused": self.automation_paused,
@@ -3404,10 +3398,6 @@ class VariationalToLighterRuntime:
         if isinstance(raw_canary, dict):
             raw_round_count = raw_canary.get("round_count")
             raw_consecutive_losses = raw_canary.get("consecutive_losses")
-            raw_consecutive_wear_breaches = raw_canary.get(
-                "consecutive_wear_breaches",
-                0,
-            )
             if (
                 isinstance(raw_round_count, bool)
                 or not isinstance(raw_round_count, int)
@@ -3417,10 +3407,6 @@ class VariationalToLighterRuntime:
                 or not isinstance(raw_consecutive_losses, int)
                 or raw_consecutive_losses < 0
                 or raw_consecutive_losses > 10_000
-                or isinstance(raw_consecutive_wear_breaches, bool)
-                or not isinstance(raw_consecutive_wear_breaches, int)
-                or raw_consecutive_wear_breaches < 0
-                or raw_consecutive_wear_breaches > 10_000
             ):
                 raise RuntimeError("Runtime state canary counters are invalid")
             self._canary_round_count = raw_round_count
@@ -3429,9 +3415,6 @@ class VariationalToLighterRuntime:
                 raise RuntimeError("Runtime state canary loss counter is invalid")
             self._canary_cumulative_loss_usd = cumulative_loss
             self._canary_consecutive_losses = raw_consecutive_losses
-            self._consecutive_round_wear_breaches = (
-                raw_consecutive_wear_breaches
-            )
             saved_state = raw_canary.get("state")
             if saved_state not in {
                 CANARY_SESSION_OBSERVING,
@@ -5536,39 +5519,6 @@ class VariationalToLighterRuntime:
                 self._canary_consecutive_losses += 1
             elif round_pnl is not None:
                 self._canary_consecutive_losses = 0
-            open_notional = var_open_notional_usd(
-                settled_round.open_record
-            )
-            frozen_open = open_candidate_from_payload(
-                settled_round.open_record.adaptive_strategy_context
-            )
-            wear_bps = (
-                frozen_open.epoch.max_normal_round_wear_bps
-                if frozen_open is not None
-                else self.strategy_config.max_normal_round_wear_bps
-            )
-            wear_floor = (
-                -open_notional * wear_bps / Decimal("10000")
-                if open_notional is not None
-                else None
-            )
-            if (
-                round_pnl is not None
-                and wear_floor is not None
-                and round_pnl < wear_floor
-            ):
-                self._consecutive_round_wear_breaches += 1
-            elif round_pnl is not None and wear_floor is not None:
-                self._consecutive_round_wear_breaches = 0
-            if (
-                self._consecutive_round_wear_breaches
-                >= MAX_CONSECUTIVE_ROUND_WEAR_BREACHES
-            ):
-                self.pause_automation(
-                    "Safety circuit breaker: "
-                    f"{self._consecutive_round_wear_breaches} consecutive "
-                    "rounds breached the configured wear floor"
-                )
             self._canary_session_state = (
                 CANARY_SESSION_HALTED
                 if self.automation_paused
@@ -5579,10 +5529,6 @@ class VariationalToLighterRuntime:
                 "round_pnl": round_pnl,
                 "cumulative_loss_usd": self._canary_cumulative_loss_usd,
                 "consecutive_losses": self._canary_consecutive_losses,
-                "wear_floor_usd": wear_floor,
-                "consecutive_wear_breaches": (
-                    self._consecutive_round_wear_breaches
-                ),
                 "state_after": self._canary_session_state,
             }
         self.last_auto_var_order_status = (
@@ -7601,10 +7547,13 @@ class VariationalToLighterRuntime:
                 error = None
             else:
                 if revalidation_error is not None:
-                    guarded_close_retry = bool(
+                    guarded_strategy_close = bool(
                         record.lighter_reduce_only
                         and record.strategy_phase == "close"
                         and record.strategy_tag == ADAPTIVE_MODEL_VERSION
+                    )
+                    guarded_close_retry = (
+                        guarded_strategy_close
                         and len(record.lighter_client_order_ids)
                         < self.strategy_config.lighter_hedge_max_attempts
                     )
@@ -7629,8 +7578,38 @@ class VariationalToLighterRuntime:
                             GUARDED_CLOSE_RETRY_DELAY_SECONDS
                         )
                         return
-                    await self.fail_lighter_hedge(record, revalidation_error)
-                    return
+                    if guarded_strategy_close:
+                        dispatch_snapshot, recovery_error = (
+                            await self.capture_lighter_hedge_dispatch_snapshot(
+                                record=record,
+                                lighter_side=side,
+                                base_amount=base_amount,
+                                market_generation=generation,
+                                market_index=market_index,
+                                force_reduce_only_recovery=True,
+                            )
+                        )
+                        if recovery_error is not None:
+                            await self.fail_lighter_hedge(
+                                record,
+                                recovery_error,
+                            )
+                            return
+                        self.trace_event(
+                            "lighter_guarded_close_recovery",
+                            trace_id,
+                            trade_key=record.trade_key,
+                            protected_attempts=len(
+                                record.lighter_client_order_ids
+                            ),
+                            reason=revalidation_error,
+                        )
+                    else:
+                        await self.fail_lighter_hedge(
+                            record,
+                            revalidation_error,
+                        )
+                        return
                 assert dispatch_snapshot is not None
                 price_i = dispatch_snapshot.price_i
                 self.trace_event(
@@ -7895,7 +7874,10 @@ class VariationalToLighterRuntime:
         if candidate is None:
             self.last_auto_var_order_status = f"{decision.action.value}: {decision.reason}"
             return None
-        if candidate.epoch.model_version == "adaptive-median-v5":
+        if candidate.epoch.model_version in {
+            "adaptive-median-v5",
+            "adaptive-median-v6",
+        }:
             now_ms = time.time_ns() // 1_000_000
             rate_range = self.recent_directional_rate_range(
                 candidate.direction,
@@ -8049,6 +8031,7 @@ class VariationalToLighterRuntime:
         base_amount: int,
         market_generation: int,
         market_index: int,
+        force_reduce_only_recovery: bool = False,
     ) -> tuple[LighterHedgeDispatchSnapshot | None, str | None]:
         """Capture the only post-Commit pre-send snapshot with integer prices.
 
@@ -8137,6 +8120,7 @@ class VariationalToLighterRuntime:
             record.lighter_reduce_only
             and record.strategy_phase == "close"
             and record.strategy_tag == ADAPTIVE_MODEL_VERSION
+            and not force_reduce_only_recovery
         )
         is_mandatory_recovery = (
             record.lighter_reduce_only and not is_guarded_strategy_close
@@ -8517,17 +8501,15 @@ class VariationalToLighterRuntime:
         reserve_bps_per_leg: Decimal | None = None,
         sample_notional_usd: Decimal | None = None,
     ) -> Decimal:
-        """Add a small fixed admission margin without chasing historical tails.
+        """Keep execution samples diagnostic instead of changing the signal.
 
         Historical adverse fills describe execution quality, not the current
-        opportunity. Feeding them back into the signal threshold made the
-        strategy wait for extreme, short-lived dislocations. They remain
-        diagnostic; the live signal uses one symmetric 0.25bps margin and the
-        fresh Firm Quote still performs the authoritative execution check.
+        opportunity. The versioned model artifact owns the probability-based
+        entry formula; the fresh Firm Quote owns the execution check.
         """
 
         del side, notional_usd, reserve_bps_per_leg, sample_notional_usd
-        return OPEN_SIGNAL_EXECUTION_HEADROOM_BPS
+        return Decimal("0")
 
     def firm_open_execution_reserve_bps(
         self,
@@ -8883,6 +8865,7 @@ class VariationalToLighterRuntime:
                     "adaptive-median-v3",
                     "adaptive-median-v4",
                     "adaptive-median-v5",
+                    "adaptive-median-v6",
                 }
                 else opposite_component.baseline
             )
@@ -8912,7 +8895,7 @@ class VariationalToLighterRuntime:
                 firm_notional,
                 epoch.reserve_bps_per_leg,
             )
-            # V3/V4/V5 previously subtracted this reserve here and added it back
+            # V3/V4/V5/V6 previously subtracted this reserve here and added it back
             # inside evaluate_firm_quote_guard(), cancelling the protection.
             # The dynamic threshold is the true minimum; the direction-specific
             # execution headroom is now added exactly once by the Firm Guard,
@@ -8924,6 +8907,7 @@ class VariationalToLighterRuntime:
                     "adaptive-median-v3",
                     "adaptive-median-v4",
                     "adaptive-median-v5",
+                    "adaptive-median-v6",
                 }
                 else -wear - close_credit + close_reserve
             )
@@ -9845,7 +9829,8 @@ class VariationalToLighterRuntime:
                     close_candidate=close_candidate,
                 )
         if (
-            frozen_open.epoch.model_version == "adaptive-median-v5"
+            frozen_open.epoch.model_version
+            in {"adaptive-median-v5", "adaptive-median-v6"}
             and decision.action is StrategyAction.CLOSE
             and close_candidate is not None
             and close_candidate.held_seconds < self.strategy_engine.early_exit_seconds
@@ -11020,8 +11005,6 @@ class VariationalToLighterRuntime:
         raw = str(reason or "-").strip()
         if not raw or raw == "-":
             return "-"
-        if is_zh and raw.startswith("Safety circuit breaker:"):
-            return "连续整轮磨损突破下限，已自动暂停新开仓"
         translated = cls._dashboard_reason_text(raw, is_zh)
         if not is_zh or translated != "状态异常，详情见日志":
             return translated
@@ -11133,6 +11116,7 @@ class VariationalToLighterRuntime:
                     "adaptive-median-v3",
                     "adaptive-median-v4",
                     "adaptive-median-v5",
+                    "adaptive-median-v6",
                 }
                 else opposite_component.baseline
             )
@@ -11199,6 +11183,7 @@ class VariationalToLighterRuntime:
             "adaptive-median-v3",
             "adaptive-median-v4",
             "adaptive-median-v5",
+            "adaptive-median-v6",
         } and (
             round_lower_bound is None
             or wear_floor is None
@@ -12168,11 +12153,21 @@ class VariationalToLighterRuntime:
             "三窗门槛"
             if is_zh
             and ADAPTIVE_MODEL_VERSION
-            in {"adaptive-median-v3", "adaptive-median-v4", "adaptive-median-v5"}
+            in {
+                "adaptive-median-v3",
+                "adaptive-median-v4",
+                "adaptive-median-v5",
+                "adaptive-median-v6",
+            }
             else (
                 "3-Window Gate"
                 if ADAPTIVE_MODEL_VERSION
-                in {"adaptive-median-v3", "adaptive-median-v4", "adaptive-median-v5"}
+                in {
+                    "adaptive-median-v3",
+                    "adaptive-median-v4",
+                    "adaptive-median-v5",
+                    "adaptive-median-v6",
+                }
                 else "Q80"
             )
         )

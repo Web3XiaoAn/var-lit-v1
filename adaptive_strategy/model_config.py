@@ -46,6 +46,10 @@ ADAPTIVE_MODEL_ARTIFACT_SHA256 = {
     "adaptive-median-v5": (
         "cfd7c30dd391bdb79432135c034c3a044e82451dc10a60d7c7fb945157e2083d"
     ),
+    # v6 replaces fixed/MAD additions with a weighted empirical quantile.
+    "adaptive-median-v6": (
+        "dd4450ee3e53f7d2e185f12b45010767a50df1f8192ce42209a145d9e8917dbc"
+    ),
 }
 
 
@@ -66,6 +70,7 @@ class ModelConfig:
     exit_quantile: int
     entry_median_margin_bps: Decimal
     entry_mad_multiplier_30m: Decimal
+    entry_quantile_pct: int
     opportunity_merge_seconds: int
     balance_ratio_limit: Decimal
     balance_minimum_events: int
@@ -98,6 +103,8 @@ class ModelConfig:
             raise ValueError("5m/30m/1h weights must sum to one")
         if not 1 <= self.exit_quantile <= 100:
             raise ValueError("exit_quantile must be between 1 and 100")
+        if not 50 <= self.entry_quantile_pct <= 80:
+            raise ValueError("entry_quantile_pct must be between 50 and 80")
         require_positive("balance_ratio_limit", self.balance_ratio_limit)
         if self.balance_minimum_events < 0:
             raise ValueError("balance_minimum_events must not be negative")
@@ -143,6 +150,15 @@ class ModelConfig:
                 "entry_median_margin_bps": Decimal("0.05"),
                 "entry_mad_multiplier_30m": Decimal("0.20"),
             },
+            "adaptive-median-v6": {
+                "weight_5m": Decimal("0.25"),
+                "weight_30m": Decimal("0.45"),
+                "weight_1h": Decimal("0.30"),
+                "exit_quantile": 95,
+                "entry_median_margin_bps": Decimal("0"),
+                "entry_mad_multiplier_30m": Decimal("0"),
+                "entry_quantile_pct": 58,
+            },
         }[self.model_version]
         fixed_formula = {
             "reference_notional_usd": (
@@ -172,6 +188,10 @@ class ModelConfig:
                     Decimal("0"),
                 ),
             ),
+            "entry_quantile_pct": (
+                self.entry_quantile_pct,
+                versioned_formula.get("entry_quantile_pct", 50),
+            ),
             "opportunity_merge_seconds": (
                 self.opportunity_merge_seconds,
                 15,
@@ -183,7 +203,8 @@ class ModelConfig:
             "balance_minimum_events": (
                 self.balance_minimum_events,
                 8
-                if self.model_version in {"adaptive-median-v4", "adaptive-median-v5"}
+                if self.model_version
+                in {"adaptive-median-v4", "adaptive-median-v5", "adaptive-median-v6"}
                 else 0,
             ),
         }
@@ -280,6 +301,7 @@ def load_model_config(path: str | Path) -> ModelConfig:
             formula.get("entryMadMultiplier30m", "0"),
             "entryMadMultiplier30m",
         ),
+        entry_quantile_pct=int(formula.get("entryQuantilePct", 50)),
         opportunity_merge_seconds=int(formula["opportunityMergeSeconds"]),
         balance_ratio_limit=_decimal(formula["balanceRatioLimit"], "balanceRatioLimit"),
         balance_minimum_events=int(formula.get("balanceMinimumEvents", 0)),
