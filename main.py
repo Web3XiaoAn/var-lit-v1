@@ -11957,10 +11957,13 @@ class VariationalToLighterRuntime:
         )
         decision = self.last_strategy_decision
         close_candidate = decision.close_candidate if decision is not None else None
-        current_open_pnl = (
-            leg_result_by_direction(current_open).pnl
+        current_open_result = (
+            leg_result_by_direction(current_open)
             if current_open is not None
             else None
+        )
+        current_open_pnl = (
+            current_open_result.pnl if current_open_result is not None else None
         )
         current_close_estimate = (
             close_candidate.expected_close_pnl_usd
@@ -12139,6 +12142,12 @@ class VariationalToLighterRuntime:
                 "currentPositionPnl": {
                     "active": current_open is not None,
                     "open": decimal_to_str(current_open_pnl),
+                    "openBasis": decimal_to_str(
+                        current_open_result.pct / Decimal("100")
+                        if current_open_result is not None
+                        and current_open_result.pct is not None
+                        else None
+                    ),
                     "closeEstimate": decimal_to_str(current_close_estimate),
                     "closeReserve": decimal_to_str(
                         -close_candidate.close_reserve_usd

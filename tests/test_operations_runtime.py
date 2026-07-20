@@ -210,6 +210,7 @@ class OperationsRuntimeTests(unittest.TestCase):
             current_pnl = snapshot["metrics"]["currentPositionPnl"]
             self.assertTrue(current_pnl["active"])
             self.assertEqual(current_pnl["open"], "0.1")
+            self.assertEqual(current_pnl["openBasis"], "0.001")
             self.assertEqual(current_pnl["closeEstimate"], "-0.07")
             self.assertEqual(current_pnl["closeReserve"], "-0.01")
             runtime.last_market_frame = None

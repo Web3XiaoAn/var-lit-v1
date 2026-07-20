@@ -674,6 +674,7 @@
           <div class="basis-window-head"><span class="basis-period">当前持仓收益</span><span class="basis-status" id="position-pnl-status">当前无持仓</span></div>
           <div class="basis-stack">
             <span class="basis-value"><span class="basis-side">开仓收益</span><strong id="position-open-pnl">—</strong></span>
+            <span class="basis-value"><span class="basis-side">开仓基差</span><strong id="position-open-basis">—</strong></span>
             <span class="basis-value"><span class="basis-side">此时平仓磨损</span><strong id="position-close-pnl">—</strong></span>
             <span class="basis-value"><span class="basis-side">平仓预留</span><strong id="position-close-reserve">—</strong></span>
           </div>
@@ -1120,6 +1121,10 @@
         }
         const positionPnl = metrics.currentPositionPnl || {};
         setText('position-pnl-status', positionPnl.active ? '持仓中' : '当前无持仓');
+        setText('position-open-basis', formatRate(positionPnl.openBasis));
+        setTone($('position-open-basis'), positionPnl.openBasis == null
+          ? ''
+          : Number(positionPnl.openBasis) >= 0 ? 'good' : 'bad');
         for (const [id, value] of [
           ['position-open-pnl', positionPnl.open],
           ['position-close-pnl', positionPnl.closeEstimate],

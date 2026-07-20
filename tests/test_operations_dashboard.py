@@ -158,10 +158,12 @@ class OperationsDashboardServerTests(unittest.TestCase):
         self.assertIn("metrics.basisMedians?.[window]", source)
         self.assertIn("当前持仓收益", source)
         self.assertIn("开仓收益", source)
+        self.assertIn("开仓基差", source)
         self.assertIn("此时平仓磨损", source)
         self.assertIn("平仓预留", source)
         self.assertIn("positionPnl.closeEstimate", source)
         self.assertIn("positionPnl.closeReserve", source)
+        self.assertIn("positionPnl.openBasis", source)
         self.assertIn("检查并保存", source)
         self.assertIn("不读取或写入真实 .env", source)
         self.assertIn(
