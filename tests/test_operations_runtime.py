@@ -13,6 +13,7 @@ os.environ.setdefault("LIGHTER_ACCOUNT_INDEX", "1")
 os.environ.setdefault("LIGHTER_API_KEY_INDEX", "1")
 os.environ.setdefault("LIGHTER_PRIVATE_KEY", "0x00")
 
+from adaptive_strategy import WindowStats
 import main as main_module
 from main import (
     AccountReconcileOutcome,
@@ -86,6 +87,27 @@ class OperationsRuntimeTests(unittest.TestCase):
                 Decimal("0"), Decimal("0"), 0, main_module.utc_now()
             )
             runtime.last_reconcile_outcome = AccountReconcileOutcome.FRESH_MATCH
+            for minutes, ready in ((5, True), (30, False)):
+                for side, median in (
+                    (main_module.StrategySide.BUY, Decimal("0.0005")),
+                    (main_module.StrategySide.SELL, Decimal("0.0006")),
+                ):
+                    runtime.strategy_window_stats[side][minutes] = (
+                        WindowStats(
+                            side=side,
+                            window_minutes=minutes,
+                            median=median,
+                            q80=median,
+                            mad=Decimal("0"),
+                            sample_count=minutes * 60,
+                            span_ms=minutes * 60 * 1000,
+                            density_per_second=Decimal("1"),
+                            max_gap_ms=1000,
+                            latest_age_ms=0,
+                            ready=ready,
+                            reason="ready" if ready else "insufficient_span",
+                        )
+                    )
             for index in range(12):
                 open_record = record(f"open-{index}", "buy", "100", "101")
                 close_record = record(f"close-{index}", "sell", "99.5", "100")
@@ -94,6 +116,27 @@ class OperationsRuntimeTests(unittest.TestCase):
                 runtime.record_order.extend(
                     (open_record.trade_key, close_record.trade_key)
                 )
+            current_open = record("current-open", "buy", "100", "100.1")
+            runtime.records[current_open.trade_key] = current_open
+            runtime.record_order.append(current_open.trade_key)
+            runtime.last_strategy_decision = main_module.StrategyDecision(
+                main_module.StrategyAction.NO_ACTION,
+                "close_floor_not_met",
+                close_candidate=main_module.CloseCandidate(
+                    close_direction=main_module.StrategySide.SELL,
+                    frame_captured_at_ms=int(main_module.time.time() * 1000),
+                    frozen_epoch_id="snapshot-test",
+                    held_seconds=60,
+                    actual_close_rate=Decimal("-0.0007"),
+                    regression_target_rate=Decimal("0"),
+                    expected_close_pnl_usd=Decimal("-0.07"),
+                    close_reserve_usd=Decimal("0.01"),
+                    round_lower_bound_usd=Decimal("0.02"),
+                    required_floor_usd=Decimal("0"),
+                    regression_passed=False,
+                    max_hold_alert=False,
+                ),
+            )
 
             snapshot = await runtime.operations_dashboard_snapshot()
 
@@ -105,6 +148,17 @@ class OperationsRuntimeTests(unittest.TestCase):
             self.assertEqual(snapshot["metrics"]["totalWear"], "5.0")
             self.assertEqual(snapshot["metrics"]["averageWear"], "0.5")
             self.assertEqual(snapshot["metrics"]["positiveRounds"], 10)
+            medians = snapshot["metrics"]["basisMedians"]
+            self.assertEqual(medians["5m"]["longVar"], "0.0005")
+            self.assertEqual(medians["5m"]["shortVar"], "0.0006")
+            self.assertTrue(medians["5m"]["ready"])
+            self.assertEqual(medians["30m"]["longVar"], "0.0005")
+            self.assertFalse(medians["30m"]["ready"])
+            self.assertIsNone(medians["1h"]["longVar"])
+            current_pnl = snapshot["metrics"]["currentPositionPnl"]
+            self.assertTrue(current_pnl["active"])
+            self.assertEqual(current_pnl["open"], "0.1")
+            self.assertEqual(current_pnl["closeEstimate"], "-0.07")
             self.assertEqual(
                 snapshot["recentRounds"][0]["direction"],
                 "多 Var / 空 Lighter",

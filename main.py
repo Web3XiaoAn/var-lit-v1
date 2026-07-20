@@ -11161,6 +11161,24 @@ class VariationalToLighterRuntime:
             * self.strategy_config.max_normal_round_wear_bps
             / Decimal("10000")
         )
+        basis_medians: dict[str, dict[str, Any]] = {}
+        for minutes, label in ((5, "5m"), (30, "30m"), (60, "1h")):
+            buy = self._dashboard_window(StrategySide.BUY, minutes)
+            sell = self._dashboard_window(StrategySide.SELL, minutes)
+            windows = (buy, sell)
+            basis_medians[label] = {
+                "longVar": decimal_to_str(
+                    buy.median if buy is not None and buy.sample_count else None
+                ),
+                "shortVar": decimal_to_str(
+                    sell.median if sell is not None and sell.sample_count else None
+                ),
+                "ready": all(window is not None and window.ready for window in windows),
+                "sampleCount": min(
+                    (window.sample_count for window in windows if window is not None),
+                    default=0,
+                ),
+            }
         round_rows: list[dict[str, Any]] = []
         total_open = Decimal("0")
         total_close = Decimal("0")
@@ -11215,6 +11233,16 @@ class VariationalToLighterRuntime:
         )
         decision = self.last_strategy_decision
         close_candidate = decision.close_candidate if decision is not None else None
+        current_open_pnl = (
+            leg_result_by_direction(current_open).pnl
+            if current_open is not None
+            else None
+        )
+        current_close_estimate = (
+            close_candidate.expected_close_pnl_usd
+            if current_open is not None and close_candidate is not None
+            else None
+        )
         current_round_estimate = (
             close_candidate.round_lower_bound_usd
             if current_open is not None and close_candidate is not None
@@ -11329,6 +11357,12 @@ class VariationalToLighterRuntime:
                 "averageWear": decimal_to_str(average_round),
                 "positiveRounds": positive_rounds,
                 "negativeRounds": negative_rounds,
+                "basisMedians": basis_medians,
+                "currentPositionPnl": {
+                    "active": current_open is not None,
+                    "open": decimal_to_str(current_open_pnl),
+                    "closeEstimate": decimal_to_str(current_close_estimate),
+                },
             },
             "recentRounds": round_rows,
         }

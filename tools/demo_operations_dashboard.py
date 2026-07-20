@@ -128,6 +128,31 @@ class DemoRuntime:
                 "averageWear": f"{total / len(self.rounds):.6f}",
                 "positiveRounds": positive,
                 "negativeRounds": len(self.rounds) - positive,
+                "basisMedians": {
+                    "5m": {
+                        "longVar": "0.0004821",
+                        "shortVar": "0.0005356",
+                        "ready": True,
+                        "sampleCount": 301,
+                    },
+                    "30m": {
+                        "longVar": "0.0004568",
+                        "shortVar": "0.0005082",
+                        "ready": True,
+                        "sampleCount": 1801,
+                    },
+                    "1h": {
+                        "longVar": "0.0004315",
+                        "shortVar": "0.0004974",
+                        "ready": True,
+                        "sampleCount": 3601,
+                    },
+                },
+                "currentPositionPnl": {
+                    "active": has_position,
+                    "open": "0.0060" if has_position else None,
+                    "closeEstimate": "-0.0347" if has_position else None,
+                },
             },
             "recentRounds": copy.deepcopy(self.rounds),
         }

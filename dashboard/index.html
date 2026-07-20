@@ -193,6 +193,31 @@
     .metric-detail { color: var(--muted); font-size: 12px; line-height: 1.35; }
     .overview-list { display: grid; gap: 8px; }
     .overview-line { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
+    .basis-strip {
+      min-height: 66px;
+      display: grid;
+      grid-template-columns: minmax(160px, .7fr) repeat(4, minmax(0, 1fr));
+      align-items: center;
+      padding: 10px 14px;
+    }
+    .basis-heading { min-width: 0; display: grid; gap: 4px; }
+    .basis-title { display: flex; align-items: center; gap: 8px; }
+    .basis-window {
+      min-width: 0;
+      display: grid;
+      gap: 5px;
+      padding: 0 14px;
+      border-left: 1px solid var(--line);
+    }
+    .basis-window-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .basis-period { font-weight: 700; }
+    .basis-status { color: var(--muted-2); font-size: 11px; white-space: nowrap; }
+    .basis-status.ready { color: var(--green); }
+    .basis-values { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; }
+    .basis-value { white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .basis-side { margin-right: 5px; color: var(--muted); }
+    .basis-side.long { color: var(--green); }
+    .basis-side.short { color: var(--amber); }
     .middle-grid {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -411,6 +436,9 @@
       .middle-grid > .panel { min-height: 0; }
       .connection-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .stream-meta { display: none; }
+      .basis-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+      .basis-heading { grid-column: 1 / -1; margin-bottom: 7px; }
+      .basis-window:first-of-type { border-left: 0; padding-left: 0; }
     }
     @media (max-width: 760px) {
       .app { grid-template-columns: 1fr; }
@@ -430,6 +458,14 @@
       .metric-value { font-size: 19px; }
       .mode-select { flex: 1 1 180px; width: auto; min-width: 0; }
       .warning-text { width: 100%; }
+      .basis-strip { grid-template-columns: 1fr; }
+      .basis-heading { margin-bottom: 0; }
+      .basis-window,
+      .basis-window:first-of-type {
+        padding: 8px 0 0;
+        border-top: 1px solid var(--line);
+        border-left: 0;
+      }
       .middle-grid { gap: 8px; }
       .card { border-radius: 15px; }
       .risk-banner { grid-template-columns: 1fr; gap: 10px; }
@@ -538,6 +574,32 @@
             <div class="overview-line"><span>策略状态</span><span class="status-line"><span class="status-dot" id="strategy-dot"></span><span id="strategy-overview">-</span></span></div>
           </div>
         </article>
+      </section>
+
+      <section class="card basis-strip" aria-label="5m、30m、1h 基差中位数与当前持仓收益">
+        <div class="basis-heading">
+          <div class="basis-title">
+            <span class="metric-icon"><svg class="icon" viewBox="0 0 24 24"><path d="M4 16l4-5 4 3 4-7 4 3"/></svg></span>
+            <strong>基差中位数</strong>
+          </div>
+          <span class="small muted">Runtime 统计 · 面板只读</span>
+        </div>
+        <div class="basis-window">
+          <div class="basis-window-head"><span class="basis-period">5m</span><span class="basis-status" id="median-5m-status">等待样本</span></div>
+          <div class="basis-values"><span class="basis-value"><span class="basis-side long">多 Var</span><strong id="median-5m-long">—</strong></span><span class="basis-value"><span class="basis-side short">空 Var</span><strong id="median-5m-short">—</strong></span></div>
+        </div>
+        <div class="basis-window">
+          <div class="basis-window-head"><span class="basis-period">30m</span><span class="basis-status" id="median-30m-status">等待样本</span></div>
+          <div class="basis-values"><span class="basis-value"><span class="basis-side long">多 Var</span><strong id="median-30m-long">—</strong></span><span class="basis-value"><span class="basis-side short">空 Var</span><strong id="median-30m-short">—</strong></span></div>
+        </div>
+        <div class="basis-window">
+          <div class="basis-window-head"><span class="basis-period">1h</span><span class="basis-status" id="median-1h-status">等待样本</span></div>
+          <div class="basis-values"><span class="basis-value"><span class="basis-side long">多 Var</span><strong id="median-1h-long">—</strong></span><span class="basis-value"><span class="basis-side short">空 Var</span><strong id="median-1h-short">—</strong></span></div>
+        </div>
+        <div class="basis-window">
+          <div class="basis-window-head"><span class="basis-period">当前持仓收益</span><span class="basis-status" id="position-pnl-status">当前无持仓</span></div>
+          <div class="basis-values"><span class="basis-value"><span class="basis-side">开仓收益</span><strong id="position-open-pnl">—</strong></span><span class="basis-value"><span class="basis-side">平仓预估收益</span><strong id="position-close-pnl">—</strong></span></div>
+        </div>
       </section>
 
       <section class="middle-grid">
@@ -693,6 +755,9 @@
         const secs = total % 60;
         return hours ? `${hours}h ${mins}m` : `${mins}m ${secs}s`;
       };
+      const formatRate = (value) => (
+        value == null ? '—' : formatSigned(Number(value) * 100, 5, '%')
+      );
       const stateText = (ok, good, bad) => ok ? good : bad;
       const setDot = (element, tone) => {
         element.classList.remove('warn', 'bad', 'muted');
@@ -931,6 +996,23 @@
         setText('round-note', metrics.currentRoundNote || '当前无持仓');
         setText('average-wear', formatSigned(metrics.averageWear, 6, ' U'));
         setText('average-note', `合计 ${formatSigned(metrics.totalWear, 6, ' U')} · 正 ${metrics.positiveRounds ?? 0} / 负 ${metrics.negativeRounds ?? 0}`);
+        for (const window of ['5m', '30m', '1h']) {
+          const median = metrics.basisMedians?.[window] || {};
+          const status = $(`median-${window}-status`);
+          setText(`median-${window}-long`, formatRate(median.longVar));
+          setText(`median-${window}-short`, formatRate(median.shortVar));
+          status.textContent = median.ready ? '已就绪' : (median.sampleCount ? '积累中' : '等待样本');
+          status.classList.toggle('ready', Boolean(median.ready));
+        }
+        const positionPnl = metrics.currentPositionPnl || {};
+        setText('position-pnl-status', positionPnl.active ? '持仓中' : '当前无持仓');
+        for (const [id, value] of [
+          ['position-open-pnl', positionPnl.open],
+          ['position-close-pnl', positionPnl.closeEstimate],
+        ]) {
+          setText(id, value == null ? '—' : formatSigned(value, 4, ' U'));
+          setTone($(id), value == null ? '' : Number(value) >= 0 ? 'good' : 'bad');
+        }
 
         setText('command-overview', stateText(connections.command, '已连接', '未连接'));
         setDot($('command-dot'), connections.command ? '' : 'bad');

@@ -143,6 +143,13 @@ class OperationsDashboardServerTests(unittest.TestCase):
         self.assertIn("做多 Var 开仓硬门槛", source)
         self.assertIn("做空 Var 开仓硬门槛", source)
         self.assertIn("常规平仓阈值开始时间", source)
+        self.assertIn("5m、30m、1h 基差中位数", source)
+        self.assertIn("Runtime 统计 · 面板只读", source)
+        self.assertIn("metrics.basisMedians?.[window]", source)
+        self.assertIn("当前持仓收益", source)
+        self.assertIn("开仓收益", source)
+        self.assertIn("平仓预估收益", source)
+        self.assertIn("positionPnl.closeEstimate", source)
         self.assertIn("检查并保存", source)
         self.assertIn("不读取或写入真实 .env", source)
         self.assertIn(
