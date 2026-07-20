@@ -177,80 +177,93 @@ class AdaptiveRuntimeTests(unittest.TestCase):
     def test_zero_wear_close_stability_accepts_continuous_or_recent_sum(self) -> None:
         runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
 
-        passed, continuous, accumulated = runtime._update_close_zero_wear_stability(
-            trade_key="continuous",
-            above_zero_wear=True,
-            now_ms=10_000,
+        def observe(
+            trade_key: str,
+            now_ms: int,
+            above: bool,
+            quote_number: int,
+            received_ms: int,
+        ) -> tuple[bool, int, int]:
+            return runtime._update_close_zero_wear_stability(
+                trade_key=trade_key,
+                above_zero_wear=above,
+                now_ms=now_ms,
+                quote_key=(quote_number, received_ms),
+                quote_received_ms=received_ms,
+            )
+
+        passed, continuous, accumulated = observe(
+            "continuous", 10_000, True, 1, 10_000
         )
         self.assertFalse(passed)
         self.assertEqual((continuous, accumulated), (0, 0))
-        passed, continuous, accumulated = runtime._update_close_zero_wear_stability(
-            trade_key="continuous",
-            above_zero_wear=True,
-            now_ms=12_000,
-        )
-        # A two-second observation gap is intentionally not treated as proof;
-        # fresh samples must bridge the interval.
-        self.assertFalse(passed)
-        self.assertEqual((continuous, accumulated), (0, 0))
-        runtime._update_close_zero_wear_stability(
-            trade_key="continuous",
-            above_zero_wear=True,
-            now_ms=12_500,
-        )
-        runtime._update_close_zero_wear_stability(
-            trade_key="continuous",
-            above_zero_wear=True,
-            now_ms=13_000,
-        )
-        runtime._update_close_zero_wear_stability(
-            trade_key="continuous",
-            above_zero_wear=True,
-            now_ms=13_500,
-        )
-        passed, continuous, accumulated = runtime._update_close_zero_wear_stability(
-            trade_key="continuous",
-            above_zero_wear=True,
-            now_ms=14_000,
-        )
+        for quote_number, now_ms in enumerate(
+            (10_500, 11_000, 11_500, 12_000),
+            start=2,
+        ):
+            passed, continuous, accumulated = observe(
+                "continuous",
+                now_ms,
+                True,
+                quote_number,
+                now_ms,
+            )
         self.assertTrue(passed)
         self.assertEqual((continuous, accumulated), (2_000, 2_000))
 
-        for now_ms, above in (
-            (20_000, True),
-            (20_500, True),
-            (20_600, False),
-            (20_700, True),
-            (21_200, True),
-            (21_300, False),
-            (21_400, True),
-            (21_900, True),
-            (22_400, True),
+        for now_ms, above, quote_number, received_ms in (
+            (20_000, True, 1, 20_000),
+            (20_500, True, 1, 20_000),
+            (20_600, False, 1, 20_000),
+            (20_700, True, 2, 20_700),
+            (21_200, True, 2, 20_700),
+            (21_300, False, 2, 20_700),
+            (21_400, True, 3, 21_400),
+            (21_900, True, 3, 21_400),
+            (21_950, False, 3, 21_400),
+            (22_000, True, 4, 22_000),
+            (22_500, True, 4, 22_000),
         ):
-            passed, continuous, accumulated = runtime._update_close_zero_wear_stability(
-                trade_key="summed",
-                above_zero_wear=above,
-                now_ms=now_ms,
+            passed, continuous, accumulated = observe(
+                "summed",
+                now_ms,
+                above,
+                quote_number,
+                received_ms,
             )
         self.assertTrue(passed)
-        self.assertEqual(continuous, 1_000)
+        self.assertEqual(continuous, 500)
         self.assertEqual(accumulated, 2_000)
 
-        passed, _continuous, accumulated = runtime._update_close_zero_wear_stability(
-            trade_key="summed",
-            above_zero_wear=False,
-            now_ms=22_500,
+        passed, _continuous, accumulated = observe(
+            "summed", 22_600, False, 4, 22_000
         )
         self.assertFalse(passed)
         self.assertEqual(accumulated, 2_000)
 
-        passed, continuous, accumulated = runtime._update_close_zero_wear_stability(
-            trade_key="summed",
-            above_zero_wear=True,
-            now_ms=32_501,
+        passed, continuous, accumulated = observe(
+            "summed", 32_601, True, 5, 32_601
         )
         self.assertFalse(passed)
         self.assertEqual((continuous, accumulated), (0, 0))
+
+    def test_zero_wear_close_does_not_reuse_one_stale_var_quote(self) -> None:
+        runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
+
+        for now_ms in (10_000, 10_300, 10_600, 11_000, 12_500):
+            passed, continuous, accumulated = (
+                runtime._update_close_zero_wear_stability(
+                    trade_key="one-quote",
+                    above_zero_wear=True,
+                    now_ms=now_ms,
+                    quote_key=(1, 10_000),
+                    quote_received_ms=10_000,
+                )
+            )
+
+        self.assertFalse(passed)
+        self.assertEqual(continuous, 0)
+        self.assertLessEqual(accumulated, 600)
 
     def test_early_close_cannot_bypass_zero_wear_stability(self) -> None:
         async def run_case() -> None:

@@ -30,6 +30,9 @@ class EventDrivenRuntimeTests(unittest.TestCase):
                 }
             )
             self.assertGreater(await asyncio.wait_for(waiter, timeout=0.1), previous)
+            quote = runtime.runtime.monitor.quotes["BTC"]
+            self.assertEqual(quote["captured_at"], "2026-01-01T00:00:00Z")
+            self.assertIsNotNone(quote["received_at"])
 
         asyncio.run(run_case())
 

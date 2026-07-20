@@ -2,8 +2,10 @@ import asyncio
 import json
 import os
 import tempfile
+import time
 import unittest
 from argparse import Namespace
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +21,52 @@ os.environ.setdefault("LIGHTER_PRIVATE_KEY", "0x00")
 
 
 class TelemetryTests(unittest.TestCase):
+    def test_market_observation_records_three_var_timestamps(self) -> None:
+        async def run_case() -> None:
+            runtime = main_module.VariationalToLighterRuntime(
+                Namespace(auto_hedge=True, lang="zh")
+            )
+            runtime.variational_ticker = "BTC"
+            runtime.market_generation = 1
+            runtime.base_amount_multiplier = 1_000_000
+            runtime.price_multiplier = 100
+            runtime.lighter_order_book = {
+                "bids": {Decimal("100.2"): Decimal("10")},
+                "asks": {Decimal("100.3"): Decimal("10")},
+            }
+            runtime.lighter_order_book_ticks = {
+                "bids": {10_020: 10_000_000},
+                "asks": {10_030: 10_000_000},
+            }
+            runtime.lighter_best_bid = Decimal("100.2")
+            runtime.lighter_best_ask = Decimal("100.3")
+            runtime.lighter_order_book_nonce = 1
+            runtime.lighter_order_book_ready = True
+            runtime.lighter_book_received_monotonic = time.monotonic()
+            quote_time = datetime.now(timezone.utc).isoformat()
+            runtime.runtime.monitor.quotes["BTC"] = {
+                "bid": "100",
+                "ask": "100.1",
+                "timestamp": quote_time,
+                "captured_at": quote_time,
+                "received_at": quote_time,
+                "received_monotonic": time.monotonic(),
+            }
+
+            frame, observation = await runtime.current_adaptive_market_frame()
+
+            self.assertIsNotNone(frame)
+            self.assertEqual(
+                observation["telemetry_schema"],
+                main_module.STRATEGY_TELEMETRY_SCHEMA,
+            )
+            self.assertEqual(observation["sample_class"], "market_observation")
+            self.assertIsNotNone(observation["var_quote_timestamp_ms"])
+            self.assertIsNotNone(observation["var_bridge_captured_at_ms"])
+            self.assertIsNotNone(observation["var_server_received_at_ms"])
+
+        asyncio.run(run_case())
+
     def test_depth_features_keep_compact_band_totals(self) -> None:
         features = main_module.lighter_depth_features(
             {
@@ -88,6 +136,12 @@ class TelemetryTests(unittest.TestCase):
             event, fields = events[0]
             self.assertEqual(event, main_module.OPEN_SURVIVAL_OBSERVATION_VERSION)
             self.assertEqual(fields["sample_kind"], "observe_threshold_candidate")
+            self.assertEqual(fields["sample_class"], fields["sample_kind"])
+            self.assertEqual(fields["sample_family"], "open_survival")
+            self.assertEqual(
+                fields["telemetry_schema"],
+                main_module.STRATEGY_TELEMETRY_SCHEMA,
+            )
             self.assertTrue(fields["sample_id"].startswith("survival-"))
             self.assertTrue(fields["threshold_pass_sides"])
             self.assertFalse(fields["policy_pass_sides"])
@@ -141,6 +195,10 @@ class TelemetryTests(unittest.TestCase):
         one_second = features["horizons_ms"]["1000"]
         self.assertEqual(one_second["book_flow_usd"], Decimal("-1"))
         self.assertEqual(one_second["trade_flow_usd"], Decimal("60"))
+        self.assertEqual(one_second["bid_added_usd"], Decimal("100"))
+        self.assertEqual(one_second["bid_removed_usd"], Decimal("0"))
+        self.assertEqual(one_second["ask_added_usd"], Decimal("101"))
+        self.assertEqual(one_second["ask_removed_usd"], Decimal("0"))
         self.assertEqual(features["microprice_bps"], Decimal("0"))
 
     def test_bounded_writer_drops_without_waiting_and_flushes_started_queue(self) -> None:

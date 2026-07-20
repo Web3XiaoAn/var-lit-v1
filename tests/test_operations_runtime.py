@@ -284,6 +284,33 @@ class OperationsRuntimeTests(unittest.TestCase):
 
         asyncio.run(run_case())
 
+    def test_scheduled_var_refresh_waits_for_flat_position(self) -> None:
+        async def run_case() -> None:
+            runtime = TrackingRuntime()
+            open_record = record("open", "buy", "100", "100.1")
+
+            with patch.object(
+                runtime,
+                "_current_open_record",
+                AsyncMock(side_effect=[open_record, None, None]),
+            ) as current_open, patch.object(
+                main_module.asyncio,
+                "sleep",
+                AsyncMock(),
+            ) as sleep, patch.object(
+                runtime,
+                "_refresh_variational_page_via_cdp",
+                AsyncMock(),
+            ) as refresh:
+                await runtime.refresh_variational_page_when_safe()
+
+            self.assertEqual(current_open.await_count, 3)
+            sleep.assert_awaited_once_with(0.25)
+            refresh.assert_awaited_once()
+            self.assertFalse(runtime._variational_refresh_in_progress)
+
+        asyncio.run(run_case())
+
     def test_lighter_only_action_creates_exact_reduce_only_recovery(self) -> None:
         async def run_case() -> None:
             runtime = TrackingRuntime()

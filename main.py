@@ -107,6 +107,7 @@ STRATEGY_MARKET_SAMPLE_VERSION = "adaptive-market-sample-v1"
 OPEN_SURVIVAL_OBSERVATION_VERSION = "open-survival-observation-v2"
 OPEN_SURVIVAL_HORIZONS_MS = (0, 100, 250, 450, 1_000)
 OPEN_SURVIVAL_DEPTH_BANDS_BPS = (1, 2, 5)
+STRATEGY_TELEMETRY_SCHEMA = "var-lit-execution-telemetry-v2"
 MICROSTRUCTURE_HORIZONS_MS = (100, 250, 500, 1_000, 2_000)
 MICROSTRUCTURE_HISTORY_SECONDS = 5.0
 OPEN_SURVIVAL_POLICY_VERSION = "hour1-survival-v1"
@@ -197,7 +198,7 @@ LIGHTER_ORDER_ENTRY_QUEUE_SIZE = 64
 AUTO_VAR_ORDER_COOLDOWN_SECONDS = 8.0
 CLOSE_ZERO_WEAR_STABILITY_MS = 2_000
 CLOSE_ZERO_WEAR_ACCUMULATION_WINDOW_MS = 10_000
-CLOSE_ZERO_WEAR_MAX_SAMPLE_GAP_MS = 1_000
+CLOSE_ZERO_WEAR_QUOTE_MAX_AGE_MS = 600
 AUTO_VAR_FILL_TIMEOUT_SECONDS = 20.0
 LIGHTER_FILL_TIMEOUT_SECONDS = 20.0
 LIGHTER_ERROR_CONFIRM_SECONDS = 5.0
@@ -1906,6 +1907,26 @@ def parse_iso_datetime(value: str | None) -> datetime | None:
     return parsed
 
 
+def parse_timestamp_ms(value: Any) -> int | None:
+    """Normalize an exchange/bridge timestamp without guessing small counters."""
+
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        numeric = Decimal(str(value))
+    except (ArithmeticError, ValueError):
+        numeric = None
+    if numeric is not None and numeric.is_finite():
+        if numeric >= Decimal("100000000000000"):
+            return int(numeric / Decimal("1000"))
+        if numeric >= Decimal("100000000000"):
+            return int(numeric)
+        if numeric >= Decimal("1000000000"):
+            return int(numeric * Decimal("1000"))
+    parsed = parse_iso_datetime(str(value))
+    return int(parsed.timestamp() * 1_000) if parsed is not None else None
+
+
 def record_hold_seconds(record: OrderLifecycle, now: datetime | None = None) -> int | None:
     filled_at = parse_iso_datetime(record.var_fill_ts_iso)
     if filled_at is None:
@@ -2312,6 +2333,9 @@ class VariationalToLighterRuntime:
         self.lighter_order_book_lock = asyncio.Lock()
         self.lighter_book_received_monotonic: float | None = None
         self.lighter_book_flow: deque[tuple[float, Decimal]] = deque()
+        self.lighter_book_activity: deque[
+            tuple[float, str, Decimal, Decimal]
+        ] = deque()
         self.lighter_mid_history: deque[tuple[float, Decimal]] = deque()
         self.lighter_trade_flow: deque[tuple[float, Decimal]] = deque()
         self.lighter_trade_ids: deque[int] = deque(maxlen=10_000)
@@ -2365,6 +2389,8 @@ class VariationalToLighterRuntime:
         self._close_zero_wear_started_ms: int | None = None
         self._close_zero_wear_last_sample_ms: int | None = None
         self._close_zero_wear_last_above = False
+        self._close_zero_wear_quote_key: tuple[int, int] | None = None
+        self._close_zero_wear_quote_expires_ms: int | None = None
         self._close_zero_wear_intervals: deque[tuple[int, int]] = deque()
         self._close_range_deferral_started_ms: dict[str, int] = {}
         self.pending_var_intent: VarOrderIntent | None = None
@@ -6078,6 +6104,7 @@ class VariationalToLighterRuntime:
             self.lighter_best_ask = None
             self.lighter_book_received_monotonic = None
             self.lighter_book_flow.clear()
+            self.lighter_book_activity.clear()
             self.lighter_mid_history.clear()
             self.lighter_trade_flow.clear()
             self.lighter_trade_ids.clear()
@@ -6103,6 +6130,8 @@ class VariationalToLighterRuntime:
             else None
         )
         signed_flow_usd = Decimal("0")
+        added_usd = Decimal("0")
+        removed_usd = Decimal("0")
         changed = False
         for level in levels:
             if isinstance(level, list) and len(level) >= 2:
@@ -6137,8 +6166,13 @@ class VariationalToLighterRuntime:
                 and price <= ask_ceiling
             )
             if record_flow and in_near_book:
+                delta = size - previous_size
                 direction = Decimal("1") if side == "bids" else Decimal("-1")
-                signed_flow_usd += direction * price * (size - previous_size)
+                signed_flow_usd += direction * price * delta
+                if delta > 0:
+                    added_usd += price * delta
+                elif delta < 0:
+                    removed_usd -= price * delta
             if price_tick <= 0:
                 continue
             previous_tick = self.lighter_order_book_ticks[side].get(price_tick)
@@ -6150,6 +6184,10 @@ class VariationalToLighterRuntime:
         if changed:
             self.lighter_vwap_cache.clear()
             self.lighter_execution_tick_cache.clear()
+        if record_flow and (added_usd or removed_usd):
+            self.lighter_book_activity.append(
+                (time.monotonic(), side, added_usd, removed_usd)
+            )
         return signed_flow_usd
 
     def refresh_lighter_best_prices_locked(self) -> None:
@@ -6194,6 +6232,7 @@ class VariationalToLighterRuntime:
                 )
             )
         self._prune_microstructure_history(self.lighter_book_flow, observed)
+        self._prune_microstructure_history(self.lighter_book_activity, observed)
         self._prune_microstructure_history(self.lighter_mid_history, observed)
 
     def record_lighter_public_trades(
@@ -6241,6 +6280,7 @@ class VariationalToLighterRuntime:
         observed = time.monotonic() if now is None else now
         for history in (
             self.lighter_book_flow,
+            self.lighter_book_activity,
             self.lighter_mid_history,
             self.lighter_trade_flow,
         ):
@@ -6272,6 +6312,17 @@ class VariationalToLighterRuntime:
         horizons: dict[str, Any] = {}
         for horizon_ms in MICROSTRUCTURE_HORIZONS_MS:
             cutoff = observed - horizon_ms / 1_000
+            activity = {
+                "bid_added_usd": Decimal("0"),
+                "bid_removed_usd": Decimal("0"),
+                "ask_added_usd": Decimal("0"),
+                "ask_removed_usd": Decimal("0"),
+            }
+            for timestamp, side, added, removed in self.lighter_book_activity:
+                if timestamp >= cutoff:
+                    prefix = "bid" if side == "bids" else "ask"
+                    activity[f"{prefix}_added_usd"] += added
+                    activity[f"{prefix}_removed_usd"] += removed
             past_mid = next(
                 (
                     value
@@ -6289,6 +6340,7 @@ class VariationalToLighterRuntime:
                     (value for timestamp, value in self.lighter_trade_flow if timestamp >= cutoff),
                     Decimal("0"),
                 ),
+                **activity,
                 "past_return_bps": (
                     (mid / past_mid - Decimal("1")) * Decimal("10000")
                     if mid is not None and past_mid is not None and past_mid > 0
@@ -6979,6 +7031,11 @@ class VariationalToLighterRuntime:
         identity = self._strategy_identity()
         observation: dict[str, Any] = {
             "version": STRATEGY_MARKET_SAMPLE_VERSION,
+            "telemetry_schema": STRATEGY_TELEMETRY_SCHEMA,
+            "sample_family": "strategy_market",
+            "sample_class": "market_observation",
+            "execution_mode": self.strategy_config.execution_mode,
+            "session_id": self.open_survival_session_id,
             "valid": False,
             "rejection_reason": "strategy_identity_unavailable",
         }
@@ -7001,7 +7058,9 @@ class VariationalToLighterRuntime:
             var_bid = to_decimal(quote.get("bid"))
             var_ask = to_decimal(quote.get("ask"))
             var_received = quote.get("received_monotonic")
+            var_quote_timestamp = quote.get("timestamp")
             var_captured_at = parse_iso_datetime(quote.get("captured_at"))
+            var_received_at = parse_iso_datetime(quote.get("received_at"))
         if (
             var_bid is None
             or var_ask is None
@@ -7072,7 +7131,11 @@ class VariationalToLighterRuntime:
         assert actual_lighter_buy is not None
 
         now_monotonic = time.monotonic()
-        var_age_ms = max(0, int((now_monotonic - float(var_received)) * 1000))
+        var_transport_age_ms = max(
+            0,
+            int((now_monotonic - float(var_received)) * 1000),
+        )
+        var_age_ms = var_transport_age_ms
         if var_captured_at is not None:
             source_age_ms = max(
                 0,
@@ -7084,6 +7147,17 @@ class VariationalToLighterRuntime:
             var_age_ms = max(var_age_ms, source_age_ms)
         lighter_age_ms = max(0, int((now_monotonic - lighter_received) * 1000))
         source_skew_ms = abs(int((float(var_received) - lighter_received) * 1000))
+        var_quote_timestamp_ms = parse_timestamp_ms(var_quote_timestamp)
+        var_bridge_captured_ms = (
+            int(var_captured_at.timestamp() * 1_000)
+            if var_captured_at is not None
+            else None
+        )
+        var_server_received_ms = (
+            int(var_received_at.timestamp() * 1_000)
+            if var_received_at is not None
+            else None
+        )
         observation.update(
             {
                 "var_bid": decimal_to_str(var_bid),
@@ -7091,6 +7165,23 @@ class VariationalToLighterRuntime:
                 "var_captured_at": (
                     var_captured_at.isoformat() if var_captured_at is not None else None
                 ),
+                "var_quote_timestamp": var_quote_timestamp,
+                "var_quote_timestamp_ms": var_quote_timestamp_ms,
+                "var_bridge_captured_at_ms": var_bridge_captured_ms,
+                "var_server_received_at_ms": var_server_received_ms,
+                "var_quote_to_bridge_ms": (
+                    max(0, var_bridge_captured_ms - var_quote_timestamp_ms)
+                    if var_bridge_captured_ms is not None
+                    and var_quote_timestamp_ms is not None
+                    else None
+                ),
+                "var_bridge_to_server_ms": (
+                    max(0, var_server_received_ms - var_bridge_captured_ms)
+                    if var_server_received_ms is not None
+                    and var_bridge_captured_ms is not None
+                    else None
+                ),
+                "var_transport_age_ms": var_transport_age_ms,
                 "var_age_ms": var_age_ms,
                 "lighter_age_ms": lighter_age_ms,
                 "source_skew_ms": source_skew_ms,
@@ -7128,16 +7219,17 @@ class VariationalToLighterRuntime:
         )
         captured_ms = time.time_ns() // 1_000_000
         var_source_ms = (
-            int(var_captured_at.timestamp() * 1_000)
-            if var_captured_at is not None
-            else captured_ms - var_age_ms
+            var_quote_timestamp_ms
+            or var_bridge_captured_ms
+            or captured_ms - var_transport_age_ms
         )
+        var_received_ms = var_server_received_ms or captured_ms - var_transport_age_ms
         frame = MarketFrame(
             asset=asset,
             captured_at_ms=captured_ms,
             variational_clock=SourceClock(
                 source_timestamp_ms=max(0, var_source_ms),
-                received_timestamp_ms=max(0, captured_ms - var_age_ms),
+                received_timestamp_ms=max(0, var_received_ms),
                 age_ms=var_age_ms,
             ),
             lighter_clock=SourceClock(
@@ -7292,6 +7384,9 @@ class VariationalToLighterRuntime:
             OPEN_SURVIVAL_OBSERVATION_VERSION,
             None,
             schema=OPEN_SURVIVAL_OBSERVATION_VERSION,
+            telemetry_schema=STRATEGY_TELEMETRY_SCHEMA,
+            sample_family="open_survival",
+            sample_class=sample_kind,
             session_id=self.open_survival_session_id,
             sample_id=sample_id,
             sample_kind=sample_kind,
@@ -7309,6 +7404,20 @@ class VariationalToLighterRuntime:
             var_bid=frame.var_bid,
             var_ask=frame.var_ask,
             var_source_timestamp_ms=frame.variational_clock.source_timestamp_ms,
+            var_received_timestamp_ms=(
+                frame.variational_clock.received_timestamp_ms
+            ),
+            var_quote_timestamp=observation.get("var_quote_timestamp"),
+            var_quote_timestamp_ms=observation.get("var_quote_timestamp_ms"),
+            var_bridge_captured_at_ms=observation.get(
+                "var_bridge_captured_at_ms"
+            ),
+            var_server_received_at_ms=observation.get(
+                "var_server_received_at_ms"
+            ),
+            var_quote_to_bridge_ms=observation.get("var_quote_to_bridge_ms"),
+            var_bridge_to_server_ms=observation.get("var_bridge_to_server_ms"),
+            var_transport_age_ms=observation.get("var_transport_age_ms"),
             var_age_ms=observation.get("var_age_ms"),
             lighter_age_ms=observation.get("lighter_age_ms"),
             source_skew_ms=observation.get("source_skew_ms"),
@@ -10261,6 +10370,8 @@ class VariationalToLighterRuntime:
         self._close_zero_wear_started_ms = None
         self._close_zero_wear_last_sample_ms = None
         self._close_zero_wear_last_above = False
+        self._close_zero_wear_quote_key = None
+        self._close_zero_wear_quote_expires_ms = None
         self._close_zero_wear_intervals.clear()
 
     def _update_close_zero_wear_stability(
@@ -10269,13 +10380,14 @@ class VariationalToLighterRuntime:
         trade_key: str,
         above_zero_wear: bool,
         now_ms: int,
+        quote_key: tuple[int, int] | None,
+        quote_received_ms: int | None,
     ) -> tuple[bool, int, int]:
-        """Track recent positive gross-round time without touching I/O paths.
+        """Track fresh Var-backed zero-wear evidence for an early close.
 
-        Continuous time and the union of positive intervals in the latest ten
-        seconds may authorize an early close while the newest evaluation is
-        still positive. A stale/missing evaluation ends the active interval, so
-        a delayed loop cannot manufacture stability evidence.
+        Re-evaluating the same Var quote may extend evidence only until that
+        quote is 600ms old. Lighter-only updates therefore cannot manufacture
+        seconds of confirmation from one stale Var observation.
         """
 
         if self._close_stability_trade_key != trade_key:
@@ -10285,26 +10397,54 @@ class VariationalToLighterRuntime:
             self._reset_close_zero_wear_stability(trade_key)
             last_ms = None
 
-        gap_ms = now_ms - last_ms if last_ms is not None else None
-        previous_interval_ended = (
-            self._close_zero_wear_last_above
-            and (
-                not above_zero_wear
-                or gap_ms is None
-                or gap_ms > CLOSE_ZERO_WEAR_MAX_SAMPLE_GAP_MS
-            )
+        quote_expires_ms = (
+            quote_received_ms + CLOSE_ZERO_WEAR_QUOTE_MAX_AGE_MS
+            if quote_received_ms is not None
+            else None
         )
-        if previous_interval_ended:
+        fresh_quote = bool(
+            quote_key is not None
+            and quote_received_ms is not None
+            and quote_received_ms <= now_ms
+            and quote_expires_ms is not None
+            and now_ms <= quote_expires_ms
+        )
+        effective_above = above_zero_wear and fresh_quote
+        same_quote = quote_key == self._close_zero_wear_quote_key
+        bridge_new_quote = bool(
+            not same_quote
+            and effective_above
+            and self._close_zero_wear_last_above
+            and last_ms is not None
+            and now_ms - last_ms <= CLOSE_ZERO_WEAR_QUOTE_MAX_AGE_MS
+            and quote_received_ms is not None
+            and self._close_zero_wear_quote_expires_ms is not None
+            and quote_received_ms <= self._close_zero_wear_quote_expires_ms
+        )
+        keep_active = bool(
+            self._close_zero_wear_last_above
+            and effective_above
+            and (same_quote or bridge_new_quote)
+            and last_ms is not None
+            and now_ms - last_ms <= CLOSE_ZERO_WEAR_QUOTE_MAX_AGE_MS
+        )
+        if self._close_zero_wear_started_ms is not None and not keep_active:
             started_ms = self._close_zero_wear_started_ms
-            if started_ms is not None and last_ms is not None and last_ms > started_ms:
-                self._close_zero_wear_intervals.append((started_ms, last_ms))
+            end_ms = last_ms if last_ms is not None else started_ms
+            previous_expiry = self._close_zero_wear_quote_expires_ms
+            if previous_expiry is not None:
+                end_ms = min(end_ms, previous_expiry)
+            if end_ms > started_ms:
+                self._close_zero_wear_intervals.append((started_ms, end_ms))
             self._close_zero_wear_started_ms = None
 
-        if above_zero_wear and self._close_zero_wear_started_ms is None:
+        if effective_above and self._close_zero_wear_started_ms is None:
             self._close_zero_wear_started_ms = now_ms
 
         self._close_zero_wear_last_sample_ms = now_ms
-        self._close_zero_wear_last_above = above_zero_wear
+        self._close_zero_wear_last_above = effective_above
+        self._close_zero_wear_quote_key = quote_key
+        self._close_zero_wear_quote_expires_ms = quote_expires_ms
 
         cutoff_ms = now_ms - CLOSE_ZERO_WEAR_ACCUMULATION_WINDOW_MS
         while (
@@ -10317,13 +10457,18 @@ class VariationalToLighterRuntime:
             for start_ms, end_ms in self._close_zero_wear_intervals
         )
         continuous_ms = 0
-        if above_zero_wear and self._close_zero_wear_started_ms is not None:
-            continuous_ms = max(0, now_ms - self._close_zero_wear_started_ms)
+        if effective_above and self._close_zero_wear_started_ms is not None:
+            active_end_ms = min(now_ms, quote_expires_ms or now_ms)
+            continuous_ms = max(
+                0,
+                active_end_ms - self._close_zero_wear_started_ms,
+            )
             accumulated_ms += max(
                 0,
-                now_ms - max(self._close_zero_wear_started_ms, cutoff_ms),
+                active_end_ms
+                - max(self._close_zero_wear_started_ms, cutoff_ms),
             )
-        confirmed = above_zero_wear and (
+        confirmed = effective_above and (
             continuous_ms >= CLOSE_ZERO_WEAR_STABILITY_MS
             or accumulated_ms >= CLOSE_ZERO_WEAR_STABILITY_MS
         )
@@ -10409,6 +10554,8 @@ class VariationalToLighterRuntime:
                 trade_key=current_open.trade_key,
                 above_zero_wear=False,
                 now_ms=time.time_ns() // 1_000_000,
+                quote_key=None,
+                quote_received_ms=None,
             )
             self.last_auto_var_close_status = f"PAUSE: exact_close_frame_error ({exc})"
             return None
@@ -10417,6 +10564,8 @@ class VariationalToLighterRuntime:
                 trade_key=current_open.trade_key,
                 above_zero_wear=False,
                 now_ms=time.time_ns() // 1_000_000,
+                quote_key=None,
+                quote_received_ms=None,
             )
             self.last_auto_var_close_status = "PAUSE: exact_close_market_frame_unavailable"
             return None
@@ -10447,6 +10596,13 @@ class VariationalToLighterRuntime:
                     trade_key=current_open.trade_key,
                     above_zero_wear=early_exit and gross_round_pnl > Decimal("0"),
                     now_ms=now_ms,
+                    quote_key=(
+                        frame.variational_clock.source_timestamp_ms,
+                        frame.variational_clock.received_timestamp_ms,
+                    ),
+                    quote_received_ms=(
+                        frame.variational_clock.received_timestamp_ms
+                    ),
                 )
             )
             close_candidate = replace(
@@ -12526,15 +12682,23 @@ class VariationalToLighterRuntime:
         raise RuntimeError("Var 页面刷新后，三条扩展通道没有在 60 秒内恢复")
 
     async def refresh_variational_page_when_safe(self) -> None:
-        self._variational_refresh_in_progress = True
-        try:
-            while not self.stop_flag and self.transition_in_progress():
+        while not self.stop_flag:
+            if self.transition_in_progress() or await self._current_open_record() is not None:
                 await asyncio.sleep(0.25)
-            if self.stop_flag:
+                continue
+            self._variational_refresh_in_progress = True
+            try:
+                # Close the race with an open/hedge that started immediately
+                # before the refresh guard became visible to the signal loop.
+                if (
+                    self.transition_in_progress()
+                    or await self._current_open_record() is not None
+                ):
+                    continue
+                await self._refresh_variational_page_via_cdp()
                 return
-            await self._refresh_variational_page_via_cdp()
-        finally:
-            self._variational_refresh_in_progress = False
+            finally:
+                self._variational_refresh_in_progress = False
 
     async def variational_page_refresh_loop(self) -> None:
         delay = VARIATIONAL_PAGE_REFRESH_SECONDS

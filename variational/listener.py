@@ -211,6 +211,7 @@ class VariationalMonitor:
             "mark_price": mark,
             "timestamp": ts,
             "received_monotonic": asyncio.get_running_loop().time(),
+            "received_at": utc_now(),
             "captured_at": captured_at,
             "raw": payload,
         }
