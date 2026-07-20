@@ -11259,6 +11259,7 @@ class VariationalToLighterRuntime:
         )
         return {
             "schema": "var-lit-v1-operations-state-v1",
+            "environment": "runtime",
             "sequence": self._operations_dashboard_sequence,
             "generatedAt": utc_now(),
             "dataAgeMs": data_age,

@@ -97,6 +97,7 @@ class OperationsRuntimeTests(unittest.TestCase):
 
             snapshot = await runtime.operations_dashboard_snapshot()
 
+            self.assertEqual(snapshot["environment"], "runtime")
             self.assertEqual(len(snapshot["recentRounds"]), 10)
             self.assertEqual(snapshot["recentRounds"][0]["number"], 3)
             self.assertEqual(snapshot["metrics"]["totalOpenWear"], "10")

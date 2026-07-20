@@ -79,6 +79,7 @@ class DemoRuntime:
         has_position = abs(float(self.positions["var"])) > 1e-9
         return {
             "schema": "var-lit-v1-operations-state-v1",
+            "environment": "demo",
             "sequence": self.sequence,
             "generatedAt": "demo",
             "dataAgeMs": 85,

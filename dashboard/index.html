@@ -468,7 +468,7 @@
       <header class="topbar" id="top">
         <div class="topbar-left">
           <span class="brand">自动化监控台</span>
-          <span class="mode-select">V5 原型 · 双边持仓</span>
+          <span class="mode-select" id="mode-label">V5 · 双边持仓</span>
           <span class="status-line" id="runtime-state"><span class="status-dot"></span><span>等待连接</span></span>
           <span class="status-line warning-text" id="headline-alert">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l9 16H3z"/><path d="M12 9v4M12 17h.01"/></svg>
@@ -484,8 +484,8 @@
             <div class="popover-panel" id="notice-panel">
               <div class="notice-head"><strong>运行通知</strong><span class="badge" id="notice-count">2 条</span></div>
               <div class="notice-list" id="notice-list">
-                <div class="notice-row"><span>本地模拟验收环境</span><span class="small muted">不连接交易所，不发送订单</span></div>
-                <div class="notice-row"><span>双方账户模拟对账完成</span><span class="small muted">数量一致 · 85ms 前</span></div>
+                <div class="notice-row"><span id="environment-title">等待环境识别</span><span class="small muted" id="environment-detail">正在连接状态流</span></div>
+                <div class="notice-row"><span id="reconcile-title">账户对账状态</span><span class="small muted" id="reconcile-detail">等待权威快照</span></div>
               </div>
             </div>
           </div>
@@ -557,7 +557,7 @@
             <div class="switch-item"><span>数据中断保护</span><label class="switch-control"><input type="checkbox" checked disabled><span>开启</span></label></div>
           </div>
           <div class="settings-footer"><button class="btn btn-primary" id="save-config" type="button">检查并保存</button></div>
-          <div class="config-message" id="config-message">参数修改需确认；本地演示仅更新内存，不读取或写入真实 .env。</div>
+          <div class="config-message" id="config-message">参数修改需二次确认；保存行为以当前连接环境为准。</div>
           <div class="action" id="config-action"><div class="action-detail" aria-live="polite"></div></div>
         </article>
 
@@ -570,15 +570,15 @@
             <div class="risk-segment"><span class="small muted">运行健康</span><span class="status-line"><span class="status-dot" id="health-dot"></span><strong id="risk-health">-</strong></span></div>
           </div>
           <div class="actions" id="actions"></div>
-          <div class="risk-note">
+          <div class="risk-note" id="risk-note">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>
-            <span>当前页面为纯本地模拟验收版。所有操作仍需读取模拟快照并经过 60 秒二次确认。</span>
+            <span id="risk-note-text">正在识别当前连接环境。所有操作均需权威快照与 60 秒二次确认。</span>
           </div>
         </article>
       </section>
 
       <section class="card panel connections" aria-label="持仓与连接">
-        <div class="section-head"><h2>持仓与连接</h2><span class="small muted">实时权威快照（模拟）</span></div>
+        <div class="section-head"><h2>持仓与连接</h2><span class="small muted" id="snapshot-label">实时权威快照</span></div>
         <div class="connection-grid">
           <article class="card connection-card">
             <div class="connection-head"><span class="metric-icon"><svg class="icon"><use href="#i-shield"/></svg></span><span>Var 仓位</span></div>
@@ -646,7 +646,7 @@
         { group: '主控操作', key: 'force_round_close', name: '强制整轮平仓', desc: '忽略收益阈值，保留成交与账户安全校验。', danger: true },
         { group: '仓位处理', key: 'close_var_residual', name: '仅平 Var 残仓', desc: '仅平 Var 剩余仓位，不触发 Lighter 对冲。', danger: true },
         { group: '仓位处理', key: 'close_lighter_residual', name: '仅平 Lighter 残仓', desc: '按账户精确数量提交 reduce-only 平仓。', danger: true },
-        { group: '辅助工具', key: 'refresh_var', name: '安全刷新 Var', desc: '确认无未决 Commit 后刷新模拟页面。' },
+        { group: '辅助工具', key: 'refresh_var', name: '安全刷新 Var', desc: '确认无未决 Commit 后刷新 Var 页面。' },
         { group: '辅助工具', key: 'reconcile', name: '对账并恢复自动化', desc: '重新核验双方账户后恢复。' }
       ];
       let confirmationTimer = null;
@@ -655,6 +655,7 @@
       let configDirty = false;
       let controlsLocked = false;
       let lastSnapshot = null;
+      const isDemo = () => lastSnapshot?.environment === 'demo';
 
       const create = (tag, className = '', text) => {
         const element = document.createElement(tag);
@@ -785,7 +786,7 @@
         const detail = wrapper.querySelector('.action-detail');
         const revision = ++prepareRevision;
         detail.classList.remove('refused');
-        detail.innerHTML = '<p>正在读取最新模拟账户与执行状态…</p>';
+        detail.innerHTML = '<p>正在读取最新权威账户与执行状态…</p>';
         try {
           const prepared = await api('/api/actions/prepare', { action: definition.key, payload: {} });
           if (revision !== prepareRevision || !wrapper.classList.contains('open')) return;
@@ -861,16 +862,18 @@
           const detail = wrapper.querySelector('.action-detail');
           detail.classList.remove('refused');
           detail.replaceChildren(
-            detailHead('操作已受理', '模拟结果'),
-            create('p', 'good', result.message || '已执行，并等待模拟账户快照确认结果。')
+            detailHead('操作已受理', isDemo() ? '模拟结果' : '执行结果'),
+            create('p', 'good', result.message || '已执行，并等待权威账户快照确认结果。')
           );
           if (definition.key === 'stage_config') {
             configDirty = false;
-            setText('config-state', '演示已保存');
-            setText('config-message', '演示参数已更新；没有读取或写入任何真实配置文件。');
+            setText('config-state', isDemo() ? '演示已保存' : '已写入待重启');
+            setText('config-message', isDemo()
+              ? '演示参数已更新；没有读取或写入任何真实配置文件。'
+              : '参数已写入 .env；重启 Runtime 后生效。');
           }
-          showToast(result.message || '模拟操作已完成。', 'good');
-          addNotice(definition.name, '本地模拟操作 · 刚刚');
+          showToast(result.message || '操作已完成。', 'good');
+          addNotice(definition.name, `${isDemo() ? '本地模拟操作' : 'Runtime 操作'} · 刚刚`);
         } catch (error) {
           renderRefusal(wrapper, '操作未完成', error.message);
           showToast(error.message, 'bad');
@@ -886,6 +889,33 @@
         const strategy = snapshot.strategy || {};
         const config = snapshot.config || {};
         const recent = snapshot.recentRounds || [];
+        const demo = isDemo();
+        const live = strategy.mode === 'live';
+
+        setText('mode-label', demo ? 'V5 原型 · 双边持仓' : 'V5 运行 · 双边持仓');
+        setText('environment-title', demo
+          ? '本地模拟验收环境'
+          : `真实 Runtime · ${live ? '实盘模式' : '观察模式'}`);
+        setText('environment-detail', demo
+          ? '不连接交易所，不发送订单'
+          : '已连接当前运行进程，操作以权威状态为准');
+        setText('reconcile-title', demo ? '双方账户模拟对账' : '双方账户权威对账');
+        setText('reconcile-detail', positions.matched
+          ? `数量一致 · ${snapshot.dataAgeMs ?? '-'}ms 前`
+          : (positions.reconcile || '等待权威快照'));
+        setText('snapshot-label', demo ? '实时权威快照（模拟）' : '实时权威快照（Runtime）');
+        setText('risk-note-text', demo
+          ? '当前页面为纯本地模拟验收版。所有操作仍需模拟快照与 60 秒二次确认。'
+          : (live
+            ? '当前为实盘模式；确认操作可触发真实账户操作，仍需权威快照与 60 秒二次确认。'
+            : '当前连接真实 Runtime；操作会读取权威快照并需 60 秒二次确认。'));
+        setTone($('risk-note'), !demo && live ? 'bad' : '');
+        if (!document.body.dataset.environment) {
+          setText('config-message', demo
+            ? '参数修改需确认；本地演示只更新内存，不读取或写入真实 .env。'
+            : '参数修改需确认；保存会写入 .env，并在 Runtime 重启后生效。');
+        }
+        document.body.dataset.environment = demo ? 'demo' : 'runtime';
 
         const runtime = $('runtime-state');
         runtime.lastElementChild.textContent = health.runtimeActive ? '运行中' : '初始化中';
@@ -909,7 +939,7 @@
         setText('strategy-overview', strategy.status || '-');
         setDot($('strategy-dot'), strategy.openPaused ? 'warn' : '');
 
-        setText('risk-mode', strategy.openPaused ? '暂停新开仓' : (strategy.mode === 'live' ? '实盘运行（模拟）' : '观察模式'));
+        setText('risk-mode', strategy.openPaused ? '暂停新开仓' : (live ? `实盘运行${demo ? '（模拟）' : ''}` : '观察模式'));
         setText('risk-state', health.risk || '-');
         setDot($('risk-dot'), health.level === 'error' ? 'bad' : health.level === 'warning' ? 'warn' : '');
         setText('risk-health', `${snapshot.dataAgeMs ?? '-'}ms 数据延迟`);
@@ -1021,10 +1051,10 @@
           return;
         }
         const revision = ++prepareRevision;
-        setText('config-message', '正在校验模拟参数…');
+        setText('config-message', `正在校验${isDemo() ? '模拟' : 'Runtime'}参数…`);
         const detail = wrapper.querySelector('.action-detail');
         detail.classList.remove('refused');
-        detail.innerHTML = '<p>正在读取最新模拟配置与安全状态…</p>';
+        detail.innerHTML = '<p>正在读取最新配置与安全状态…</p>';
         try {
           const prepared = await api('/api/actions/prepare', { action: definition.key, payload });
           if (revision !== prepareRevision || !wrapper.classList.contains('open')) return;
@@ -1070,7 +1100,9 @@
         input.addEventListener('input', () => {
           configDirty = true;
           setText('config-state', '有未保存修改');
-          setText('config-message', '参数尚未保存；本地演示只会更新内存。');
+          setText('config-message', isDemo()
+            ? '参数尚未保存；本地演示只会更新内存。'
+            : '参数尚未保存；保存后写入 .env，重启 Runtime 生效。');
           if (input.id === 'cfg-live') setText('cfg-live-label', input.checked ? '开启' : '关闭');
           closeAction($('config-action'));
         });
@@ -1094,7 +1126,7 @@
         link.download = 'var-lit-dashboard-snapshot.json';
         link.click();
         URL.revokeObjectURL(link.href);
-        showToast('当前本地模拟状态快照已导出。', 'good');
+        showToast(`当前${isDemo() ? '本地模拟' : 'Runtime'}状态快照已导出。`, 'good');
       });
       document.querySelectorAll('.rail-jump').forEach((button) => {
         button.addEventListener('click', () => $(button.dataset.target).scrollIntoView({ behavior: 'smooth', block: 'start' }));
