@@ -265,6 +265,67 @@ class DepthRevalidationTests(unittest.TestCase):
 
         asyncio.run(run_case())
 
+    def test_exhausted_close_limit_sweeps_without_another_protected_retry(self):
+        async def run_case():
+            runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
+            runtime.base_amount_multiplier = 1_000
+            normal_close = OrderLifecycle(
+                trade_key="exhausted-normal-close",
+                trade_id="exhausted-normal-close",
+                side="sell",
+                qty=Decimal("1"),
+                asset="BTC",
+                auto_hedge_enabled=True,
+                last_variational_status="filled",
+                firm_price=Decimal("100"),
+                firm_required_pnl=Decimal("-1"),
+                strategy_phase="close",
+                strategy_tag=main_module.ADAPTIVE_MODEL_VERSION,
+                lighter_reduce_only=True,
+                lighter_client_order_ids=[11],
+            )
+            protected_attempts = 0
+            submitted_prices = []
+
+            async def snapshot(**kwargs):
+                nonlocal protected_attempts
+                if kwargs.get("force_reduce_only_recovery"):
+                    return (
+                        main_module.LighterHedgeDispatchSnapshot(
+                            market_generation=runtime.market_generation,
+                            market_index=runtime.lighter_market_index,
+                            base_amount=1_000,
+                            price_i=1,
+                            marginal_price_i=9_900,
+                            economic_limit_price_i=None,
+                            order_book_nonce=2,
+                            quote_age_ms=0,
+                        ),
+                        None,
+                    )
+                protected_attempts += 1
+                return None, main_module.LIGHTER_IOC_LIMIT_EXHAUSTED
+
+            async def persist_noop():
+                return None
+
+            async def submit(**kwargs):
+                submitted_prices.append(kwargs["price"])
+                return type("Receipt", (), {"code": 0, "tx_hash": "recovery"})(), None
+
+            runtime.capture_lighter_hedge_dispatch_snapshot = snapshot
+            runtime.persist_runtime_state = persist_noop
+            runtime.submit_lighter_create_order = submit
+
+            await runtime._run_lighter_order_task(normal_close)
+
+            self.assertEqual(protected_attempts, 1)
+            self.assertEqual(submitted_prices, [1])
+            self.assertEqual(normal_close.hedge_status, "submitted")
+            self.assertFalse(runtime.automation_paused)
+
+        asyncio.run(run_case())
+
     def test_reduce_only_first_send_uses_mandatory_market_sweep(self):
         async def run_case():
             runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))

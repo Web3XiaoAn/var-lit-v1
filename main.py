@@ -186,6 +186,9 @@ V5_CLOSE_RATE_RANGE_BPS = Decimal("4.0")
 V5_RATE_RANGE_WINDOW_MS = 5_000
 V5_CLOSE_RANGE_MAX_DEFERRAL_MS = 2_000
 GUARDED_CLOSE_RETRY_DELAY_SECONDS = 0.25
+LIGHTER_IOC_LIMIT_EXHAUSTED = (
+    "Lighter marginal depth price moved outside the configured IOC limit"
+)
 LIGHTER_WS_URL = "wss://mainnet.zklighter.elliot.ai/stream"
 LIGHTER_WS_PING_INTERVAL_SECONDS = 30
 LIGHTER_WS_PING_TIMEOUT_SECONDS = 30
@@ -8152,6 +8155,7 @@ class VariationalToLighterRuntime:
                     )
                     guarded_close_retry = (
                         guarded_strategy_close
+                        and revalidation_error != LIGHTER_IOC_LIMIT_EXHAUSTED
                         and len(record.lighter_client_order_ids)
                         < self.strategy_config.lighter_hedge_max_attempts
                     )
@@ -8867,7 +8871,7 @@ class VariationalToLighterRuntime:
                 effective_slippage_bps=effective_slippage_bps,
                 reduce_only_recovery=is_mandatory_recovery,
             )
-            return None, "Lighter marginal depth price moved outside the configured IOC limit"
+            return None, LIGHTER_IOC_LIMIT_EXHAUSTED
 
         snapshot = LighterHedgeDispatchSnapshot(
             market_generation=market_generation,
