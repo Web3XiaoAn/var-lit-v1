@@ -1070,6 +1070,26 @@ class AdaptiveRuntimeTests(unittest.TestCase):
 
         asyncio.run(run_case())
 
+    def test_skipped_close_hedge_pause_is_reconcilable_after_restart(self) -> None:
+        async def run_case() -> None:
+            runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
+            payload = self._empty_runtime_payload(runtime)
+            reason = (
+                "Skipped Lighter close hedge: matching open Lighter hedge was not filled."
+            )
+            payload["automation_paused"] = True
+            payload["automation_pause_reason"] = reason
+            with tempfile.TemporaryDirectory(prefix="skipped-close-hedge-") as tmp:
+                state_file = Path(tmp) / "runtime_state.json"
+                state_file.write_text(json.dumps(payload), encoding="utf-8")
+                with patch.object(main_module, "RUNTIME_STATE_FILE", state_file):
+                    self.assertTrue(await runtime.load_runtime_state("BTC"))
+
+            self.assertTrue(runtime.automation_paused)
+            self.assertEqual(runtime._reconcile_pause_reason, reason)
+
+        asyncio.run(run_case())
+
     def test_unreadable_or_malformed_runtime_state_fails_closed_without_rewrite(self) -> None:
         async def run_case() -> None:
             runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))

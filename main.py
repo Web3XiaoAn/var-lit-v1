@@ -3142,6 +3142,7 @@ class VariationalToLighterRuntime:
                 (
                     "Account reconciliation",
                     "Lighter hedge failed:",
+                    "Skipped Lighter close hedge:",
                     "Lighter order status unresolved after",
                     "Recovered an unresolved Var order",
                     "Var commit was accepted but its position/fill could not be confirmed",
@@ -4738,7 +4739,9 @@ class VariationalToLighterRuntime:
         )
         restored_failed_hedge_pause = bool(
             resume_reconcile_pause
-            and self.automation_pause_reason.startswith("Lighter hedge failed:")
+            and self.automation_pause_reason.startswith(
+                ("Lighter hedge failed:", "Skipped Lighter close hedge:")
+            )
         )
         recovered_to_flat = bool(
             current_open is None
