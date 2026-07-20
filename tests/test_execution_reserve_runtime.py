@@ -101,8 +101,10 @@ class ExecutionReserveRuntimeTests(unittest.TestCase):
             Decimal("0"),
         )
         self.assertEqual(
-            runtime.firm_open_execution_reserve_usd(Decimal("200")),
-            Decimal("0.01"),
+            runtime.firm_open_execution_reserve_usd(
+                Decimal("200"), side="BUY"
+            ),
+            Decimal("0"),
         )
         self.assertEqual(
             {sample.notional_bucket for sample in runtime._execution_loss_record_snapshot()},
@@ -213,6 +215,39 @@ class ExecutionReserveRuntimeTests(unittest.TestCase):
         self.assertEqual(samples[0].loss_bps, Decimal("-100"))
         self.assertEqual(runtime._execution_samples_revision, 1)
         self.assertEqual(dict(runtime.execution_loss_samples), {})
+
+    def test_hour1_survival_margin_uses_range_and_adverse_book_pressure(self) -> None:
+        from tests.test_dashboard_calculations import make_open_candidate
+
+        runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
+        candidate = make_open_candidate(runtime)
+        frame = runtime.last_market_frame
+        assert frame is not None
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        current = frame.reference_rates.buy
+        runtime._opportunity_samples[main_module.StrategySide.BUY].extend(
+            [
+                main_module.OpportunitySample(now_ms - 5_000, current),
+                main_module.OpportunitySample(
+                    now_ms - 1_000, current - Decimal("0.0001")
+                ),
+            ]
+        )
+        runtime.lighter_order_book = {
+            "bids": {Decimal("100"): Decimal("1")},
+            "asks": {Decimal("100.01"): Decimal("3")},
+        }
+        runtime.lighter_best_bid = Decimal("100")
+        runtime.lighter_best_ask = Decimal("100.01")
+
+        with patch("main.time.time_ns", return_value=now_ms * 1_000_000):
+            headroom = runtime.effective_open_execution_headroom_bps(
+                candidate.direction.value,
+                candidate.order_notional_usd,
+            )
+
+        self.assertGreater(headroom, Decimal("0.12"))
+        self.assertLess(headroom, Decimal("0.13"))
 
 
 if __name__ == "__main__":

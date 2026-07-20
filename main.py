@@ -104,9 +104,20 @@ TRACE_FILE_NAME = "execution_trace.jsonl"
 STRATEGY_MARKET_SAMPLES_FILE_NAME = "strategy_market_samples.jsonl"
 STRATEGY_SAMPLE_SESSION_FILE_NAME = "current_strategy_sample_session.json"
 STRATEGY_MARKET_SAMPLE_VERSION = "adaptive-market-sample-v1"
-OPEN_SURVIVAL_OBSERVATION_VERSION = "open-survival-observation-v1"
+OPEN_SURVIVAL_OBSERVATION_VERSION = "open-survival-observation-v2"
 OPEN_SURVIVAL_HORIZONS_MS = (0, 100, 250, 450, 1_000)
 OPEN_SURVIVAL_DEPTH_BANDS_BPS = (1, 2, 5)
+MICROSTRUCTURE_HORIZONS_MS = (100, 250, 500, 1_000, 2_000)
+MICROSTRUCTURE_HISTORY_SECONDS = 5.0
+OPEN_SURVIVAL_POLICY_VERSION = "hour1-survival-v1"
+OPEN_SURVIVAL_RANGE_WEIGHT = {
+    "BUY": Decimal("0.10"),
+    "SELL": Decimal("0.20"),
+}
+OPEN_SURVIVAL_IMBALANCE_WEIGHT = {
+    "BUY": Decimal("0.05"),
+    "SELL": Decimal("0.40"),
+}
 ADAPTIVE_MODEL_FILE = Path(__file__).resolve().parent / "adaptive_strategy" / "models" / "adaptive-median-v6.json"
 RESEARCH_DATABASE_FILE = (
     Path(__file__).resolve().parent
@@ -1328,6 +1339,15 @@ def adaptive_strategy_config_hash(
     payload = {
         "model_version": ADAPTIVE_MODEL_VERSION,
         "model_hash": model_hash,
+        "open_survival_policy_version": OPEN_SURVIVAL_POLICY_VERSION,
+        "open_survival_range_weight": {
+            side: decimal_to_str(value)
+            for side, value in OPEN_SURVIVAL_RANGE_WEIGHT.items()
+        },
+        "open_survival_imbalance_weight": {
+            side: decimal_to_str(value)
+            for side, value in OPEN_SURVIVAL_IMBALANCE_WEIGHT.items()
+        },
         "reference_notional_usd": decimal_to_str(config.reference_notional_usd),
         "order_notional_usd": decimal_to_str(config.order_notional_usd),
         "buy_dynamic_threshold_min_pct": decimal_to_str(
@@ -2229,6 +2249,7 @@ class VariationalToLighterRuntime:
         self._variational_refresh_in_progress = False
         self.open_survival_session_id = f"survival-{uuid.uuid4().hex}"
         self._last_open_survival_key: tuple[Any, ...] | None = None
+        self.last_open_survival_sample_id: str | None = None
         self.open_survival_tasks: set[asyncio.Task[None]] = set()
         self.execution_loss_samples: defaultdict[
             tuple[str, str], deque[Decimal]
@@ -2287,6 +2308,11 @@ class VariationalToLighterRuntime:
         self.lighter_order_book_sequence_gap = False
         self.lighter_order_book_lock = asyncio.Lock()
         self.lighter_book_received_monotonic: float | None = None
+        self.lighter_book_flow: deque[tuple[float, Decimal]] = deque()
+        self.lighter_mid_history: deque[tuple[float, Decimal]] = deque()
+        self.lighter_trade_flow: deque[tuple[float, Decimal]] = deque()
+        self.lighter_trade_ids: deque[int] = deque(maxlen=10_000)
+        self._lighter_trade_id_set: set[int] = set()
         self.lighter_private_stream_ready = False
         self._last_lighter_order_refresh_at = 0.0
         self.market_generation = 0
@@ -2296,6 +2322,7 @@ class VariationalToLighterRuntime:
         # older local subclasses/tests; production uses the two tasks below.
         self.lighter_ws_task: asyncio.Task[None] | None = None
         self.lighter_market_ws_task: asyncio.Task[None] | None = None
+        self.lighter_trade_ws_task: asyncio.Task[None] | None = None
         self.lighter_private_ws_task: asyncio.Task[None] | None = None
         self.trade_task: asyncio.Task[None] | None = None
         self.strategy_signal_task: asyncio.Task[None] | None = None
@@ -6047,10 +6074,32 @@ class VariationalToLighterRuntime:
             self.lighter_best_bid = None
             self.lighter_best_ask = None
             self.lighter_book_received_monotonic = None
+            self.lighter_book_flow.clear()
+            self.lighter_mid_history.clear()
+            self.lighter_trade_flow.clear()
+            self.lighter_trade_ids.clear()
+            self._lighter_trade_id_set.clear()
 
-    def update_lighter_order_book(self, side: str, levels: list[Any]) -> None:
+    def update_lighter_order_book(
+        self,
+        side: str,
+        levels: list[Any],
+        *,
+        record_flow: bool = False,
+    ) -> Decimal:
         price_multiplier = int(self.price_multiplier or 1)
         base_multiplier = int(self.base_amount_multiplier or 1)
+        bid_floor = (
+            self.lighter_best_bid * Decimal("0.9995")
+            if self.lighter_best_bid is not None
+            else None
+        )
+        ask_ceiling = (
+            self.lighter_best_ask * Decimal("1.0005")
+            if self.lighter_best_ask is not None
+            else None
+        )
+        signed_flow_usd = Decimal("0")
         changed = False
         for level in levels:
             if isinstance(level, list) and len(level) >= 2:
@@ -6070,10 +6119,23 @@ class VariationalToLighterRuntime:
                 raise ValueError(
                     f"Lighter order-book level is not aligned to fixed precision: {price}/{size}"
                 )
+            previous_size = self.lighter_order_book[side].get(price, Decimal("0"))
             if size > 0:
                 self.lighter_order_book[side][price] = size
             else:
                 self.lighter_order_book[side].pop(price, None)
+            in_near_book = (
+                side == "bids"
+                and bid_floor is not None
+                and price >= bid_floor
+            ) or (
+                side == "asks"
+                and ask_ceiling is not None
+                and price <= ask_ceiling
+            )
+            if record_flow and in_near_book:
+                direction = Decimal("1") if side == "bids" else Decimal("-1")
+                signed_flow_usd += direction * price * (size - previous_size)
             if price_tick <= 0:
                 continue
             previous_tick = self.lighter_order_book_ticks[side].get(price_tick)
@@ -6085,6 +6147,7 @@ class VariationalToLighterRuntime:
         if changed:
             self.lighter_vwap_cache.clear()
             self.lighter_execution_tick_cache.clear()
+        return signed_flow_usd
 
     def refresh_lighter_best_prices_locked(self) -> None:
         price_multiplier = Decimal(str(self.price_multiplier or 1))
@@ -6101,6 +6164,138 @@ class VariationalToLighterRuntime:
         # Compatibility for restored/mock books that predate the tick cache.
         self.lighter_best_bid = max(self.lighter_order_book["bids"], default=None)
         self.lighter_best_ask = min(self.lighter_order_book["asks"], default=None)
+
+    @staticmethod
+    def _prune_microstructure_history(
+        history: deque[tuple[float, Decimal]],
+        now: float,
+    ) -> None:
+        cutoff = now - MICROSTRUCTURE_HISTORY_SECONDS
+        while history and history[0][0] < cutoff:
+            history.popleft()
+
+    def record_lighter_book_microstructure(
+        self,
+        signed_flow_usd: Decimal,
+        *,
+        now: float | None = None,
+    ) -> None:
+        observed = time.monotonic() if now is None else now
+        if signed_flow_usd:
+            self.lighter_book_flow.append((observed, signed_flow_usd))
+        if self.lighter_best_bid is not None and self.lighter_best_ask is not None:
+            self.lighter_mid_history.append(
+                (
+                    observed,
+                    (self.lighter_best_bid + self.lighter_best_ask) / Decimal("2"),
+                )
+            )
+        self._prune_microstructure_history(self.lighter_book_flow, observed)
+        self._prune_microstructure_history(self.lighter_mid_history, observed)
+
+    def record_lighter_public_trades(
+        self,
+        trades: Any,
+        *,
+        now: float | None = None,
+    ) -> int:
+        """Accumulate signed taker flow without retaining public trade payloads."""
+
+        observed = time.monotonic() if now is None else now
+        rows = trades if isinstance(trades, list) else [trades]
+        recorded = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                trade_id = int(row.get("trade_id"))
+                usd = Decimal(str(row.get("usd_amount") or "0"))
+                if usd <= 0:
+                    usd = Decimal(str(row.get("price") or "0")) * Decimal(
+                        str(row.get("size") or "0")
+                    )
+            except (ArithmeticError, TypeError, ValueError):
+                continue
+            if trade_id in self._lighter_trade_id_set or usd <= 0:
+                continue
+            if len(self.lighter_trade_ids) == self.lighter_trade_ids.maxlen:
+                self._lighter_trade_id_set.discard(self.lighter_trade_ids[0])
+            self.lighter_trade_ids.append(trade_id)
+            self._lighter_trade_id_set.add(trade_id)
+            maker_ask = row.get("is_maker_ask") in {True, 1, "1", "true", "True"}
+            self.lighter_trade_flow.append(
+                (observed, usd if maker_ask else -usd)
+            )
+            recorded += 1
+        self._prune_microstructure_history(self.lighter_trade_flow, observed)
+        return recorded
+
+    def lighter_microstructure_features(
+        self,
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        observed = time.monotonic() if now is None else now
+        for history in (
+            self.lighter_book_flow,
+            self.lighter_mid_history,
+            self.lighter_trade_flow,
+        ):
+            self._prune_microstructure_history(history, observed)
+
+        mid = self.lighter_mid_history[-1][1] if self.lighter_mid_history else None
+        microprice_bps: Decimal | None = None
+        if (
+            mid is not None
+            and self.lighter_best_bid is not None
+            and self.lighter_best_ask is not None
+        ):
+            bid_size = self.lighter_order_book["bids"].get(
+                self.lighter_best_bid, Decimal("0")
+            )
+            ask_size = self.lighter_order_book["asks"].get(
+                self.lighter_best_ask, Decimal("0")
+            )
+            total = bid_size + ask_size
+            if total > 0 and mid > 0:
+                microprice = (
+                    self.lighter_best_ask * bid_size
+                    + self.lighter_best_bid * ask_size
+                ) / total
+                microprice_bps = (microprice / mid - Decimal("1")) * Decimal(
+                    "10000"
+                )
+
+        horizons: dict[str, Any] = {}
+        for horizon_ms in MICROSTRUCTURE_HORIZONS_MS:
+            cutoff = observed - horizon_ms / 1_000
+            past_mid = next(
+                (
+                    value
+                    for timestamp, value in reversed(self.lighter_mid_history)
+                    if timestamp <= cutoff
+                ),
+                None,
+            )
+            horizons[str(horizon_ms)] = {
+                "book_flow_usd": sum(
+                    (value for timestamp, value in self.lighter_book_flow if timestamp >= cutoff),
+                    Decimal("0"),
+                ),
+                "trade_flow_usd": sum(
+                    (value for timestamp, value in self.lighter_trade_flow if timestamp >= cutoff),
+                    Decimal("0"),
+                ),
+                "past_return_bps": (
+                    (mid / past_mid - Decimal("1")) * Decimal("10000")
+                    if mid is not None and past_mid is not None and past_mid > 0
+                    else None
+                ),
+            }
+        return {
+            "microprice_bps": microprice_bps,
+            "horizons_ms": horizons,
+        }
 
     def validate_order_book_update(self, order_book: dict[str, Any]) -> bool:
         new_offset = int(order_book.get("offset", 0) or 0)
@@ -6457,6 +6652,7 @@ class VariationalToLighterRuntime:
             for task in (
                 self.lighter_ws_task,
                 self.lighter_market_ws_task,
+                self.lighter_trade_ws_task,
                 self.lighter_private_ws_task,
             )
             if task is not None and not task.done()
@@ -6467,6 +6663,7 @@ class VariationalToLighterRuntime:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.lighter_ws_task = None
         self.lighter_market_ws_task = None
+        self.lighter_trade_ws_task = None
         self.lighter_private_ws_task = None
         self.lighter_private_stream_ready = False
 
@@ -6478,6 +6675,9 @@ class VariationalToLighterRuntime:
             return
         self.lighter_market_ws_task = asyncio.create_task(
             self.handle_lighter_market_ws(), name="lighter-market-ws"
+        )
+        self.lighter_trade_ws_task = asyncio.create_task(
+            self.handle_lighter_trade_ws(), name="lighter-trade-ws"
         )
         self.lighter_private_ws_task = asyncio.create_task(
             self.handle_lighter_private_ws(), name="lighter-private-ws"
@@ -6528,7 +6728,11 @@ class VariationalToLighterRuntime:
                                 self.lighter_snapshot_loaded = True
                                 self.lighter_order_book_ready = True
                                 self.refresh_lighter_best_prices_locked()
-                                self.lighter_book_received_monotonic = time.monotonic()
+                                observed = time.monotonic()
+                                self.lighter_book_received_monotonic = observed
+                                self.record_lighter_book_microstructure(
+                                    Decimal("0"), now=observed
+                                )
                         elif msg_type == "update/order_book" and self.lighter_snapshot_loaded:
                             order_book = data.get("order_book", {})
                             if "offset" not in order_book:
@@ -6537,14 +6741,25 @@ class VariationalToLighterRuntime:
                                 if not self.validate_order_book_update(order_book):
                                     self.lighter_order_book_sequence_gap = True
                                 else:
-                                    self.update_lighter_order_book("bids", order_book.get("bids", []))
-                                    self.update_lighter_order_book("asks", order_book.get("asks", []))
+                                    signed_flow = self.update_lighter_order_book(
+                                        "bids",
+                                        order_book.get("bids", []),
+                                        record_flow=True,
+                                    ) + self.update_lighter_order_book(
+                                        "asks",
+                                        order_book.get("asks", []),
+                                        record_flow=True,
+                                    )
                                     self.lighter_order_book_offset = int(order_book["offset"])
                                     nonce = order_book.get("nonce")
                                     if nonce is not None:
                                         self.lighter_order_book_nonce = int(nonce)
                                     self.refresh_lighter_best_prices_locked()
-                                    self.lighter_book_received_monotonic = time.monotonic()
+                                    observed = time.monotonic()
+                                    self.lighter_book_received_monotonic = observed
+                                    self.record_lighter_book_microstructure(
+                                        signed_flow, now=observed
+                                    )
                         if msg_type in {"subscribed/order_book", "update/order_book"}:
                             self.notify_market_signal()
                         if self.lighter_order_book_sequence_gap:
@@ -6556,6 +6771,43 @@ class VariationalToLighterRuntime:
                 return
             except Exception as exc:
                 self.logger.warning("Lighter market websocket reconnect after error: %s", exc)
+                await asyncio.sleep(1)
+
+    async def handle_lighter_trade_ws(self) -> None:
+        """Keep a bounded public taker-flow window for research features."""
+
+        while not self.stop_flag:
+            try:
+                async with websockets.connect(
+                    self.build_lighter_ws_url(),
+                    ping_interval=LIGHTER_WS_PING_INTERVAL_SECONDS,
+                    ping_timeout=LIGHTER_WS_PING_TIMEOUT_SECONDS,
+                ) as ws:
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "subscribe",
+                                "channel": f"trade/{self.lighter_market_index}",
+                            }
+                        )
+                    )
+                    while not self.stop_flag:
+                        raw = await ws.recv()
+                        if isinstance(raw, bytes):
+                            raw = raw.decode("utf-8", errors="replace")
+                        data = json.loads(raw)
+                        msg_type = data.get("type")
+                        if msg_type in {"subscribed/trade", "update/trade"}:
+                            self.record_lighter_public_trades(data.get("trades"))
+                        elif msg_type == "ping":
+                            await ws.send(json.dumps({"type": "pong"}))
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                self.logger.warning(
+                    "Lighter public trade websocket reconnect after error: %s",
+                    exc,
+                )
                 await asyncio.sleep(1)
 
     async def handle_lighter_private_ws(self) -> None:
@@ -7008,6 +7260,12 @@ class VariationalToLighterRuntime:
         observation: dict[str, Any],
         epoch: ParameterEpoch | None,
         windows: dict[str, Any],
+        sample_id: str,
+        sample_kind: str,
+        threshold_pass_sides: tuple[str, ...],
+        policy_pass_sides: tuple[str, ...],
+        survival_reserve_bps: dict[str, Decimal],
+        microstructure: dict[str, Any],
         started: float,
     ) -> None:
         thresholds = {
@@ -7032,7 +7290,14 @@ class VariationalToLighterRuntime:
             None,
             schema=OPEN_SURVIVAL_OBSERVATION_VERSION,
             session_id=self.open_survival_session_id,
+            sample_id=sample_id,
+            sample_kind=sample_kind,
+            threshold_pass_sides=threshold_pass_sides,
+            policy_pass_sides=policy_pass_sides,
             mode=self.strategy_config.execution_mode,
+            strategy_config_hash=self.strategy_config_hash,
+            open_survival_policy_version=OPEN_SURVIVAL_POLICY_VERSION,
+            survival_reserve_bps=survival_reserve_bps,
             sample_timestamp_ms=frame.captured_at_ms,
             asset=frame.asset,
             market_generation=self.market_generation,
@@ -7073,6 +7338,7 @@ class VariationalToLighterRuntime:
                 )
                 for side in StrategySide
             },
+            microstructure=microstructure,
             windows=windows,
             snapshots=snapshots,
         )
@@ -7096,12 +7362,81 @@ class VariationalToLighterRuntime:
             return False
         self._last_open_survival_key = key
         started = time.monotonic()
+        epoch = self.active_parameter_epoch
+        thresholds = {
+            side: epoch.component(side).final if epoch is not None else None
+            for side in StrategySide
+        }
+        threshold_pass_sides = tuple(
+            side.value
+            for side in StrategySide
+            if thresholds[side] is not None
+            and min(
+                frame.reference_rates.for_side(side),
+                frame.actual_rates.for_side(side),
+            )
+            >= thresholds[side]
+        )
+        ranges = {
+            side: self.recent_directional_rate_range(
+                side,
+                now_ms=frame.captured_at_ms,
+                current_rate=frame.reference_rates.for_side(side),
+            )
+            for side in StrategySide
+        }
+        survival_reserve_bps = {
+            side.value: self.effective_open_execution_headroom_bps(
+                side.value,
+                frame.actual_notional_usd,
+            )
+            for side in StrategySide
+        }
+        policy_pass_sides = tuple(
+            side.value
+            for side in StrategySide
+            if side.value in threshold_pass_sides
+            and ranges[side] is not None
+            and min(
+                frame.reference_rates.for_side(side),
+                frame.actual_rates.for_side(side),
+            )
+            >= thresholds[side]
+            + survival_reserve_bps[side.value] / Decimal("10000")
+        )
+        if epoch is None:
+            sample_kind = "warmup_background"
+        elif policy_pass_sides:
+            sample_kind = (
+                "observe_policy_candidate"
+                if self.strategy_config.execution_mode == "observe"
+                else "live_policy_candidate"
+            )
+        elif threshold_pass_sides:
+            sample_kind = (
+                "observe_threshold_candidate"
+                if self.strategy_config.execution_mode == "observe"
+                else "live_threshold_candidate"
+            )
+        else:
+            sample_kind = "market_background"
+        sample_id = (
+            f"{self.open_survival_session_id}:"
+            f"{self.market_generation}:{frame.variational_clock.source_timestamp_ms}"
+        )
+        self.last_open_survival_sample_id = sample_id
         task = asyncio.create_task(
             self._record_open_survival_observation(
                 frame=frame,
                 observation=dict(observation),
-                epoch=self.active_parameter_epoch,
+                epoch=epoch,
                 windows=self._open_survival_windows(),
+                sample_id=sample_id,
+                sample_kind=sample_kind,
+                threshold_pass_sides=threshold_pass_sides,
+                policy_pass_sides=policy_pass_sides,
+                survival_reserve_bps=survival_reserve_bps,
+                microstructure=self.lighter_microstructure_features(now=started),
                 started=started,
             ),
             name="open-survival-observation",
@@ -7545,6 +7880,7 @@ class VariationalToLighterRuntime:
                 reason=decision.reason,
                 epoch_id=epoch_id,
                 direction=direction,
+                market_sample_id=self.last_open_survival_sample_id,
             )
         return decision
 
@@ -8762,43 +9098,82 @@ class VariationalToLighterRuntime:
         *,
         reserve_bps_per_leg: Decimal | None = None,
         sample_notional_usd: Decimal | None = None,
+        current_rate: Decimal | None = None,
+        now_ms: int | None = None,
     ) -> Decimal:
-        """Keep execution samples diagnostic instead of changing the signal.
+        """Estimate whether the signal can survive the opening hedge window.
 
-        Historical adverse fills describe execution quality, not the current
-        opportunity. The versioned model artifact owns the probability-based
-        entry formula; the fresh Firm Quote owns the execution check.
+        The one-hour policy has no fixed add-on.  It only reacts to the current
+        five-second rate range and adverse one-basis-point book imbalance.
+        Historical execution losses remain diagnostic and never enter here.
         """
 
-        del side, notional_usd, reserve_bps_per_leg, sample_notional_usd
-        return Decimal("0")
+        del notional_usd, reserve_bps_per_leg, sample_notional_usd
+        direction = side.strip().upper()
+        if direction not in OPEN_SURVIVAL_RANGE_WEIGHT:
+            return Decimal("0")
+        strategy_side = StrategySide(direction)
+        frame = self.last_market_frame
+        if current_rate is None:
+            if frame is None:
+                return Decimal("0")
+            current_rate = frame.reference_rates.for_side(strategy_side)
+        rate_range = self.recent_directional_rate_range(
+            strategy_side,
+            now_ms=(time.time_ns() // 1_000_000 if now_ms is None else now_ms),
+            current_rate=current_rate,
+        )
+        depth = lighter_depth_features(
+            self.lighter_order_book,
+            self.lighter_best_bid,
+            self.lighter_best_ask,
+        )
+        one_bps = depth.get("bands_bps", {}).get("1")
+        if rate_range is None or not isinstance(one_bps, dict):
+            return Decimal("0")
+        imbalance = Decimal(one_bps.get("imbalance") or 0)
+        directional_imbalance = (
+            imbalance if direction == "BUY" else -imbalance
+        )
+        adverse_imbalance = max(Decimal("0"), -directional_imbalance)
+        range_bps = rate_range * Decimal("10000")
+        return (
+            OPEN_SURVIVAL_RANGE_WEIGHT[direction] * range_bps
+            + OPEN_SURVIVAL_IMBALANCE_WEIGHT[direction] * adverse_imbalance
+        )
 
     def firm_open_execution_reserve_bps(
         self,
         *,
-        reserve_bps_per_leg: Decimal | None = None,
+        side: str,
+        notional_usd: Decimal,
+        current_rate: Decimal | None = None,
+        now_ms: int | None = None,
     ) -> Decimal:
-        """Return the fixed final-commit margin for the Lighter opening leg."""
+        """Freeze the current dynamic survival margin for Firm Guard."""
 
-        reserve = (
-            reserve_bps_per_leg
-            if reserve_bps_per_leg is not None
-            else self.strategy_config.provisional_reserve_bps_per_leg
+        return self.effective_open_execution_headroom_bps(
+            side,
+            notional_usd,
+            current_rate=current_rate,
+            now_ms=now_ms,
         )
-        if not reserve.is_finite() or reserve <= 0:
-            return Decimal("0")
-        return reserve
 
     def firm_open_execution_reserve_usd(
         self,
         notional_usd: Decimal,
         *,
-        reserve_bps_per_leg: Decimal | None = None,
+        side: str,
+        current_rate: Decimal | None = None,
+        now_ms: int | None = None,
     ) -> Decimal:
         return (
             notional_usd
             * self.firm_open_execution_reserve_bps(
-                reserve_bps_per_leg=reserve_bps_per_leg,
+                side=side,
+                notional_usd=notional_usd,
+                current_rate=current_rate,
+                now_ms=now_ms,
             )
             / Decimal("10000")
         )
@@ -9134,11 +9509,16 @@ class VariationalToLighterRuntime:
             close_credit = firm_notional * projected_exit_rate
             wear = firm_notional * epoch.max_normal_round_wear_bps / Decimal("10000")
             execution_headroom_bps = self.firm_open_execution_reserve_bps(
-                reserve_bps_per_leg=epoch.reserve_bps_per_leg,
+                side=confirmed.direction.value,
+                notional_usd=firm_notional,
+                current_rate=firm_reference_rate,
+                now_ms=now_ms,
             )
             execution_reserve = self.firm_open_execution_reserve_usd(
                 firm_notional,
-                reserve_bps_per_leg=epoch.reserve_bps_per_leg,
+                side=confirmed.direction.value,
+                current_rate=firm_reference_rate,
+                now_ms=now_ms,
             )
             firm_reference_threshold = confirmed.threshold
             if firm_reference_rate < firm_reference_threshold:
@@ -9182,6 +9562,7 @@ class VariationalToLighterRuntime:
                     "firmOpenExecutionHeadroomBps": decimal_to_str(
                         execution_headroom_bps
                     ),
+                    "openSurvivalPolicyVersion": OPEN_SURVIVAL_POLICY_VERSION,
                     "firmReferenceRate": decimal_to_str(firm_reference_rate),
                     "firmReferenceVwap": decimal_to_str(firm_reference_vwap),
                     "firmCloseReserveUsd": decimal_to_str(close_reserve),

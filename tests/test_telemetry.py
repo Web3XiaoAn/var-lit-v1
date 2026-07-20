@@ -87,11 +87,61 @@ class TelemetryTests(unittest.TestCase):
             self.assertEqual(len(events), 1)
             event, fields = events[0]
             self.assertEqual(event, main_module.OPEN_SURVIVAL_OBSERVATION_VERSION)
+            self.assertEqual(fields["sample_kind"], "observe_threshold_candidate")
+            self.assertTrue(fields["sample_id"].startswith("survival-"))
+            self.assertTrue(fields["threshold_pass_sides"])
+            self.assertFalse(fields["policy_pass_sides"])
+            self.assertEqual(
+                fields["open_survival_policy_version"],
+                main_module.OPEN_SURVIVAL_POLICY_VERSION,
+            )
+            self.assertIn("horizons_ms", fields["microstructure"])
             self.assertEqual([row["target_offset_ms"] for row in fields["snapshots"]], [0, 1, 2])
             self.assertTrue(all(row["available"] for row in fields["snapshots"]))
             self.assertEqual(order_calls, [])
 
         asyncio.run(run_case())
+
+    def test_microstructure_features_separate_book_and_trade_flow(self) -> None:
+        runtime = main_module.VariationalToLighterRuntime(
+            Namespace(auto_hedge=True, lang="zh")
+        )
+        runtime.base_amount_multiplier = 1
+        runtime.price_multiplier = 1
+        runtime.lighter_order_book = {
+            "bids": {Decimal("100"): Decimal("2")},
+            "asks": {Decimal("101"): Decimal("2")},
+        }
+        runtime.lighter_order_book_ticks = {
+            "bids": {100: 2},
+            "asks": {101: 2},
+        }
+        runtime.lighter_best_bid = Decimal("100")
+        runtime.lighter_best_ask = Decimal("101")
+
+        bid_flow = runtime.update_lighter_order_book(
+            "bids", [["100", "3"]], record_flow=True
+        )
+        ask_flow = runtime.update_lighter_order_book(
+            "asks", [["101", "3"]], record_flow=True
+        )
+        runtime.refresh_lighter_best_prices_locked()
+        runtime.record_lighter_book_microstructure(bid_flow + ask_flow, now=1.0)
+        self.assertEqual(bid_flow, Decimal("100"))
+        self.assertEqual(ask_flow, Decimal("-101"))
+
+        trades = [
+            {"trade_id": 1, "usd_amount": "100", "is_maker_ask": True},
+            {"trade_id": 2, "usd_amount": "40", "is_maker_ask": False},
+        ]
+        self.assertEqual(runtime.record_lighter_public_trades(trades, now=1.0), 2)
+        self.assertEqual(runtime.record_lighter_public_trades(trades, now=1.0), 0)
+
+        features = runtime.lighter_microstructure_features(now=1.0)
+        one_second = features["horizons_ms"]["1000"]
+        self.assertEqual(one_second["book_flow_usd"], Decimal("-1"))
+        self.assertEqual(one_second["trade_flow_usd"], Decimal("60"))
+        self.assertEqual(features["microprice_bps"], Decimal("0"))
 
     def test_bounded_writer_drops_without_waiting_and_flushes_started_queue(self) -> None:
         async def run_case() -> None:

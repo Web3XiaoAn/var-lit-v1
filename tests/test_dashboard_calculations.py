@@ -4100,11 +4100,10 @@ class DashboardCalculationTests(unittest.TestCase):
             firm_quote = broker.calls[1]["firm_quote"]
             self.assertEqual(firm_quote["quoteId"], "firm-1")
             self.assertEqual(firm_quote["guardPnl"], "0.2066")
-            self.assertEqual(firm_quote["executionReserveUsd"], "0.01001")
+            self.assertEqual(firm_quote["executionReserveUsd"], "0.0")
             self.assertEqual(
                 Decimal(firm_quote["guardMinPnl"]),
-                open_candidate.threshold * Decimal("200.2")
-                + Decimal("0.01001"),
+                open_candidate.threshold * Decimal("200.2"),
             )
             self.assertEqual(
                 firm_quote["strategyTag"],
