@@ -174,7 +174,7 @@ class AdaptiveRuntimeTests(unittest.TestCase):
             )
         )
 
-    def test_zero_wear_close_stability_requires_current_continuous_interval(self) -> None:
+    def test_zero_wear_close_stability_accepts_continuous_or_recent_sum(self) -> None:
         runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
 
         passed, continuous, accumulated = runtime._update_close_zero_wear_stability(
@@ -232,9 +232,25 @@ class AdaptiveRuntimeTests(unittest.TestCase):
                 above_zero_wear=above,
                 now_ms=now_ms,
             )
-        self.assertFalse(passed)
+        self.assertTrue(passed)
         self.assertEqual(continuous, 1_000)
         self.assertEqual(accumulated, 2_000)
+
+        passed, _continuous, accumulated = runtime._update_close_zero_wear_stability(
+            trade_key="summed",
+            above_zero_wear=False,
+            now_ms=22_500,
+        )
+        self.assertFalse(passed)
+        self.assertEqual(accumulated, 2_000)
+
+        passed, continuous, accumulated = runtime._update_close_zero_wear_stability(
+            trade_key="summed",
+            above_zero_wear=True,
+            now_ms=32_501,
+        )
+        self.assertFalse(passed)
+        self.assertEqual((continuous, accumulated), (0, 0))
 
     def test_early_close_cannot_bypass_zero_wear_stability(self) -> None:
         async def run_case() -> None:

@@ -9879,9 +9879,9 @@ class VariationalToLighterRuntime:
         """Track recent positive gross-round time without touching I/O paths.
 
         Continuous time and the union of positive intervals in the latest ten
-        seconds are both measured for diagnostics. Only the current continuous
-        interval may authorize an early close. A stale/missing evaluation ends
-        that interval, so a delayed loop cannot manufacture stability evidence.
+        seconds may authorize an early close while the newest evaluation is
+        still positive. A stale/missing evaluation ends the active interval, so
+        a delayed loop cannot manufacture stability evidence.
         """
 
         if self._close_stability_trade_key != trade_key:
@@ -9929,9 +9929,9 @@ class VariationalToLighterRuntime:
                 0,
                 now_ms - max(self._close_zero_wear_started_ms, cutoff_ms),
             )
-        confirmed = (
-            above_zero_wear
-            and continuous_ms >= CLOSE_ZERO_WEAR_STABILITY_MS
+        confirmed = above_zero_wear and (
+            continuous_ms >= CLOSE_ZERO_WEAR_STABILITY_MS
+            or accumulated_ms >= CLOSE_ZERO_WEAR_STABILITY_MS
         )
         return confirmed, continuous_ms, accumulated_ms
 
