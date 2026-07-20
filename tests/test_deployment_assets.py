@@ -140,6 +140,20 @@ class DeploymentAssetTests(unittest.TestCase):
         self.assertIn("--no-dashboard", source)
         self.assertNotIn("--no-hedge", source)
 
+    def test_research_collector_is_isolated_and_low_priority(self) -> None:
+        source = (
+            PROJECT_DIR
+            / "deploy"
+            / "systemd"
+            / "var-lit-v1-research.service.example"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("sync_research_database.py --follow --interval 5", source)
+        self.assertIn("Nice=10", source)
+        self.assertIn("IOSchedulingClass=idle", source)
+        self.assertIn("MemoryMax=512M", source)
+        self.assertNotIn("main.py", source)
+
     def test_runtime_restarts_after_chrome_without_restarting_chrome(self) -> None:
         display = (
             PROJECT_DIR

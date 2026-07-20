@@ -146,7 +146,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--bootstrap", action="store_true")
     parser.add_argument("--once", action="store_true")
-    parser.add_argument("--follow-pid", type=int)
+    follow = parser.add_mutually_exclusive_group()
+    follow.add_argument(
+        "--follow",
+        action="store_true",
+        help="Continuously synchronize until interrupted.",
+    )
+    follow.add_argument("--follow-pid", type=int)
     parser.add_argument(
         "--interval",
         type=float,
@@ -182,7 +188,7 @@ def main() -> int:
     )
     if args.once:
         output["sync"] = synchronizer.sync_once()
-    if args.follow_pid is not None:
+    if args.follow or args.follow_pid is not None:
         stop = False
 
         def handle_stop(_signum: int, _frame: object) -> None:
@@ -191,7 +197,9 @@ def main() -> int:
 
         signal.signal(signal.SIGTERM, handle_stop)
         signal.signal(signal.SIGINT, handle_stop)
-        while not stop and _alive(args.follow_pid):
+        while not stop and (
+            args.follow_pid is None or _alive(args.follow_pid)
+        ):
             synchronizer.sync_once()
             time.sleep(max(0.1, args.interval))
         synchronizer.sync_once()

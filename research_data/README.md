@@ -8,8 +8,16 @@
 
 ## 持续同步
 
-正式主程序每秒在后台同步一次新增完整行。同步任务只读取日志并批量写SQLite，
-不进入策略判断、Firm Quote、Commit或Lighter下单链路；数据库故障也不会暂停交易。
+本地可由正式主程序在后台同步新增完整行。服务器使用独立的低优先级
+`var-lit-v1-research.service`，默认每5秒同步一次，避免SQLite与交易主循环共用进程。
+两种方式都只读取日志并批量写SQLite，不进入策略判断、Firm Quote、Commit或
+Lighter下单链路。
+
+独立持续同步：
+
+```bash
+venv/bin/python tools/sync_research_database.py --follow --interval 5
+```
 
 当前进程尚未包含同步任务时，可临时跟随它：
 

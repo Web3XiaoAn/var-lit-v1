@@ -1,0 +1,20 @@
+[Unit]
+Description=Var-Lit V1 research database collector
+After=local-fs.target
+
+[Service]
+Type=simple
+User=varlit
+Group=varlit
+WorkingDirectory=/opt/var-lit-v1
+ExecStartPre=/usr/bin/test -f /opt/var-lit-v1/.env
+ExecStart=/opt/var-lit-v1/venv/bin/python /opt/var-lit-v1/tools/sync_research_database.py --follow --interval 5 --max-mib 900
+Restart=always
+RestartSec=5
+Nice=10
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

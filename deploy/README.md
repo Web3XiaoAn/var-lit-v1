@@ -81,10 +81,14 @@ sudo install -m 0644 \
 sudo install -m 0644 \
   /opt/var-lit-v1/deploy/systemd/var-lit-v1-runtime.service.example \
   /etc/systemd/system/var-lit-v1-runtime.service
+sudo install -m 0644 \
+  /opt/var-lit-v1/deploy/systemd/var-lit-v1-research.service.example \
+  /etc/systemd/system/var-lit-v1-research.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now var-lit-v1-display.service
 sudo systemctl enable --now var-lit-v1-window-manager.service
 sudo systemctl enable --now var-lit-v1-chrome.service
+sudo systemctl enable --now var-lit-v1-research.service
 ```
 
 此时不要启动 runtime。先检查浏览器服务：
@@ -197,7 +201,8 @@ sudo systemctl start var-lit-v1-runtime.service
 - 停止 runtime 不需要停止 Chrome；保留浏览器会话可减少重新验证和模板恢复。
 - Chrome 或 OKX 更新后，先回到一次性 VNC 流程确认登录和扩展状态，再恢复 runtime。
 - `.env`、运行目录和 Chrome profile 都在 Git 之外；升级代码不会覆盖它们。
-- 服务器默认关闭长期研究数据库，但短期滚动行情、恢复状态、成交证据和日志必须保留。
+- Runtime 内部的长期研究数据库默认关闭；独立的低优先级
+  `var-lit-v1-research.service` 每5秒把完整行同步到同构SQLite，不进入交易进程。
 
 只读资源采样：
 
