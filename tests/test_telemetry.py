@@ -122,7 +122,10 @@ class TelemetryTests(unittest.TestCase):
                 "source_skew_ms": 0,
             }
 
-            with patch.object(main_module, "OPEN_SURVIVAL_HORIZONS_MS", (0, 1, 2)):
+            with (
+                patch.object(main_module, "OPEN_SURVIVAL_HORIZONS_MS", (0, 1, 2)),
+                patch.object(main_module, "MICROSTRUCTURE_HORIZONS_MS", (1, 2)),
+            ):
                 self.assertTrue(
                     runtime.schedule_open_survival_observation(frame, observation)
                 )
@@ -151,6 +154,10 @@ class TelemetryTests(unittest.TestCase):
             )
             self.assertIn("horizons_ms", fields["microstructure"])
             self.assertEqual([row["target_offset_ms"] for row in fields["snapshots"]], [0, 1, 2])
+            self.assertEqual(
+                [row["target_offset_ms"] for row in fields["feature_snapshots"]],
+                [1, 2],
+            )
             self.assertTrue(all(row["available"] for row in fields["snapshots"]))
             self.assertEqual(order_calls, [])
 
@@ -396,6 +403,7 @@ class TelemetryTests(unittest.TestCase):
                 [
                     "variational_quote_dispatch",
                     "variational_quote_result",
+                    "open_firm_microstructure_guard",
                     "firm_quote_guard",
                     "open_precommit_depth_guard",
                     "execution_intent_prepared",

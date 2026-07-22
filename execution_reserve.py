@@ -1,8 +1,8 @@
-"""Versioned storage for execution-wear samples and audit reports.
+"""Strategy-neutral storage for bounded execution-loss samples.
 
 The runtime uses only the bounded, same-direction/same-notional cohort to
 estimate opening execution headroom.  Raw samples remain available for
-post-round review and model-version upgrades.
+post-round review and later execution-policy revisions.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-REPORT_SCHEMA = "adaptive-execution-report-v1"
+REPORT_SCHEMA = "execution-loss-samples-v1"
 EXECUTION_SAMPLE_LIMIT_PER_BUCKET = 100
 
 
@@ -143,14 +143,14 @@ class ExecutionLossSample:
         return sample
 
 
-def _read_payload(path: Path, strategy_version: str) -> list[ExecutionLossSample]:
+def _read_payload(path: Path) -> list[ExecutionLossSample]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return []
     if not isinstance(payload, dict):
         return []
-    if payload.get("schema") != REPORT_SCHEMA or payload.get("strategyVersion") != strategy_version:
+    if payload.get("schema") != REPORT_SCHEMA:
         return []
     rows = payload.get("samples")
     if not isinstance(rows, list):
@@ -160,7 +160,6 @@ def _read_payload(path: Path, strategy_version: str) -> list[ExecutionLossSample
 
 def read_execution_samples(
     path: Path,
-    strategy_version: str,
     asset: str,
     *,
     notional_usd: Decimal | None = None,
@@ -173,7 +172,7 @@ def read_execution_samples(
     )
     return [
         sample
-        for sample in _read_payload(path, strategy_version)
+        for sample in _read_payload(path)
         if sample.asset == asset_n
         and (expected_bucket is None or sample.notional_bucket == expected_bucket)
     ]
@@ -181,7 +180,6 @@ def read_execution_samples(
 
 def write_execution_samples(
     path: Path,
-    strategy_version: str,
     asset_or_samples: str | Iterable[ExecutionLossSample],
     samples: Iterable[ExecutionLossSample] | None = None,
 ) -> None:
@@ -196,7 +194,7 @@ def write_execution_samples(
     }
     existing = [
         sample
-        for sample in _read_payload(path, strategy_version)
+        for sample in _read_payload(path)
         if (sample.asset, sample.phase, sample.side, sample.notional_bucket)
         not in replacement_cohorts
     ]
@@ -211,7 +209,6 @@ def write_execution_samples(
     ]
     payload = {
         "schema": REPORT_SCHEMA,
-        "strategyVersion": strategy_version,
         "samples": [sample.to_payload() for sample in bounded],
     }
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -310,17 +310,6 @@ class ResearchDatabase:
             )
             """
         )
-        round_columns = {
-            str(row[1])
-            for row in connection.execute("PRAGMA table_info(research_rounds)")
-        }
-        if "total_execution_loss_bps" not in round_columns:
-            connection.execute(
-                """
-                ALTER TABLE research_rounds
-                ADD COLUMN total_execution_loss_bps TEXT
-                """
-            )
         connection.execute(
             """
             CREATE INDEX IF NOT EXISTS research_rounds_closed_at

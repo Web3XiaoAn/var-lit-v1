@@ -58,7 +58,10 @@ class ManualVariationalHedgeTests(unittest.TestCase):
             epoch = candidate(MODEL, now_ms=10_000)
             market = frame(
                 at_ms=10_100,
-                reference_buy=epoch.thresholds.buy.final + Decimal("0.001"),
+                reference_buy=(
+                    epoch.thresholds.buy.final
+                    + epoch.thresholds.buy.mad_30m
+                ),
                 reference_sell=epoch.thresholds.sell.final - Decimal("0.001"),
             )
             frozen = runtime.strategy_engine.evaluate_open(

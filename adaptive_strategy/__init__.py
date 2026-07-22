@@ -4,7 +4,20 @@ The package owns strategy mathematics and decisions only.  Runtime I/O,
 exchange clients and order execution remain in :mod:`main`.
 """
 
-from .engine import CLOSE_RESERVE_MULTIPLIER, StrategyEngine
+from .engine import (
+    close_floor_usd,
+    CLOSE_RESERVE_MULTIPLIER,
+    LONG_HOLD_FLOOR_START_SECONDS,
+    LONG_HOLD_FLOOR_STEP_SECONDS,
+    LONG_HOLD_FLOOR_STEP_BPS,
+    StrategyEngine,
+    long_hold_floor_adjustment_usd,
+)
+from .execution_survival import (
+    ExecutionSurvivalModel,
+    SurvivalCalibration,
+    load_execution_survival_model,
+)
 from .model_config import ModelConfig, load_model_config
 from .models import (
     Action,
@@ -47,6 +60,7 @@ __all__ = [
     "DirectionalRates",
     "DirectionalThresholds",
     "EpochActivator",
+    "ExecutionSurvivalModel",
     "MarketFrame",
     "ModelConfig",
     "OpenCandidate",
@@ -57,14 +71,21 @@ __all__ = [
     "Side",
     "SourceClock",
     "StrategyEngine",
+    "LONG_HOLD_FLOOR_START_SECONDS",
+    "LONG_HOLD_FLOOR_STEP_SECONDS",
+    "LONG_HOLD_FLOOR_STEP_BPS",
+    "SurvivalCalibration",
     "ThresholdComponents",
     "WindowStats",
     "build_parameter_candidate",
+    "close_floor_usd",
     "compile_baseline",
     "compile_entry_opportunity",
     "compile_exit_opportunity",
     "compile_q80",
     "load_model_config",
+    "load_execution_survival_model",
+    "long_hold_floor_adjustment_usd",
     "opportunity_balance_threshold",
     "epoch_from_payload",
     "epoch_to_payload",

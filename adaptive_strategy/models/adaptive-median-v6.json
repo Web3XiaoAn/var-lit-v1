@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "modelVersion": "adaptive-median-v6",
-  "calibrationDataset": "log/archive/adaptive-median-v1-calibration-20260714T1926+0800.jsonl",
+  "calibrationDataset": "server-calibration-20260714T1926+0800.jsonl",
   "calibrationDatasetSha256": "2796c9bab70988af717a2edeee97995ede5b4063186f722b15bc3979ec2e636d",
   "asset": "BTC",
   "referenceNotionalUsd": "500",

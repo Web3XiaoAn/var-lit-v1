@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import requests
 import websockets
@@ -56,6 +57,9 @@ from variational.research_database import (
 from adaptive_strategy import (
     Action as StrategyAction,
     CLOSE_RESERVE_MULTIPLIER,
+    LONG_HOLD_FLOOR_START_SECONDS,
+    LONG_HOLD_FLOOR_STEP_SECONDS,
+    LONG_HOLD_FLOOR_STEP_BPS,
     CloseCandidate,
     Decision as StrategyDecision,
     DirectionalRates,
@@ -70,6 +74,7 @@ from adaptive_strategy import (
     SourceClock,
     StrategyEngine,
     build_parameter_candidate,
+    load_execution_survival_model,
     load_model_config,
     open_candidate_from_payload,
     open_candidate_to_payload,
@@ -94,7 +99,12 @@ FORWARDER_COMMAND_PORT = 8768
 OPERATIONS_DASHBOARD_HOST = "127.0.0.1"
 DEFAULT_OPERATIONS_DASHBOARD_PORT = 8780
 OPERATIONS_DASHBOARD_ASSET_DIR = Path(__file__).resolve().parent / "dashboard"
-DOTENV_FILE = Path(__file__).resolve().parent / ".env"
+DOTENV_FILE = Path(
+    os.environ.get(
+        "VARIATIONAL_ENV_FILE",
+        Path(__file__).resolve().parent / ".env",
+    )
+).expanduser().resolve()
 LOG_DIR = Path(os.environ.get("VARIATIONAL_RUNTIME_DIR", "./log"))
 OUTPUT_DIR = LOG_DIR
 APP_LOG_FILE = LOG_DIR / "runtime.log"
@@ -110,16 +120,16 @@ OPEN_SURVIVAL_DEPTH_BANDS_BPS = (1, 2, 5)
 STRATEGY_TELEMETRY_SCHEMA = "var-lit-execution-telemetry-v2"
 MICROSTRUCTURE_HORIZONS_MS = (100, 250, 500, 1_000, 2_000)
 MICROSTRUCTURE_HISTORY_SECONDS = 5.0
-OPEN_SURVIVAL_POLICY_VERSION = "hour1-survival-v1"
-OPEN_SURVIVAL_RANGE_WEIGHT = {
-    "BUY": Decimal("0.10"),
-    "SELL": Decimal("0.20"),
-}
-OPEN_SURVIVAL_IMBALANCE_WEIGHT = {
-    "BUY": Decimal("0.05"),
-    "SELL": Decimal("0.40"),
-}
+OPEN_SURVIVAL_POLICY_VERSION = "execution-survival-v2"
+OPEN_HEDGE_RECOVERY_POLICY_VERSION = "open-hedge-recovery-v1"
+CLOSE_HOLD_FLOOR_POLICY_VERSION = "close-hold-floor-v1"
 ADAPTIVE_MODEL_FILE = Path(__file__).resolve().parent / "adaptive_strategy" / "models" / "adaptive-median-v6.json"
+EXECUTION_SURVIVAL_MODEL_FILE = (
+    Path(__file__).resolve().parent
+    / "adaptive_strategy"
+    / "models"
+    / "execution-survival-v2.json"
+)
 RESEARCH_DATABASE_FILE = (
     Path(__file__).resolve().parent
     / "research_data"
@@ -130,23 +140,25 @@ OPEN_DECISION_TRACE_HEARTBEAT_MS = 10_000
 TRACE_MAX_FILE_BYTES = 16 * 1024 * 1024
 ORDER_LOG_MAX_FILE_BYTES = 8 * 1024 * 1024
 RUNTIME_BUILD = "var-lit-v1"
-# Keep the report schema cohort stable across execution-policy-only builds so
-# restart does not discard the existing live execution-loss samples.
-EXECUTION_SAMPLE_VERSION = "2026-07-15-adaptive-median-v4-live2"
 SETTLED_EXECUTION_HISTORY_LIMIT = 100
 DASHBOARD_ROUND_BATCH_SIZE = 10
-DASHBOARD_ROUND_BATCH_VERSION = 1
+DASHBOARD_ROUND_BATCH_VERSION = 2
+DASHBOARD_HOLDING_LEDGER_RETENTION_DAYS = 7
+BEIJING_TIMEZONE = ZoneInfo("Asia/Shanghai")
 READY_TIMEOUT_SECONDS = 60.0
-VARIATIONAL_PAGE_REFRESH_SECONDS = 6 * 60 * 60
+VARIATIONAL_PAGE_REFRESH_SECONDS = 2 * 60 * 60
 VARIATIONAL_PAGE_REFRESH_RETRY_SECONDS = 10 * 60
+VARIATIONAL_PORTFOLIO_REFRESH_GRACE_SECONDS = 10
 POLL_INTERVAL_SECONDS = 0.05
 EVENT_SIGNAL_FALLBACK_SECONDS = 1.0
 STRATEGY_SAMPLE_SECONDS = 1.0
 STRATEGY_MIN_SAMPLE_INTERVAL_MS = 750
 STRATEGY_MAX_SAMPLE_GAP_MS = 60_000
-STRATEGY_HISTORY_RESUME_MAX_GAP_MS = 5 * 60 * 1_000
+STRATEGY_HISTORY_RESUME_MAX_GAP_MS = 2 * 60 * 1_000
 STRATEGY_STATISTICS_WINDOW_MS = 60 * 60 * 1_000
-STRATEGY_CACHE_KEEP_MS = STRATEGY_STATISTICS_WINDOW_MS + STRATEGY_MAX_SAMPLE_GAP_MS
+STRATEGY_CACHE_KEEP_MS = (
+    STRATEGY_STATISTICS_WINDOW_MS + STRATEGY_HISTORY_RESUME_MAX_GAP_MS
+)
 STRATEGY_CACHE_COMPACTION_INTERVAL_MS = 9 * 60 * 1_000
 STRATEGY_CACHE_STARTUP_MAX_MS = 70 * 60 * 1_000
 DEFAULT_HEDGE_SLIPPAGE_BPS = Decimal("2.0")
@@ -169,26 +181,18 @@ DEFAULT_MAX_QUOTE_AGE_MS = 600
 DEFAULT_ROUND_COOLDOWN_SECONDS = 30
 DEFAULT_VAR_ORDER_RESULT_TIMEOUT_MS = 5000
 ADAPTIVE_MODEL_VERSION = "adaptive-median-v6"
-MIGRATABLE_FLAT_V4_MODEL_HASHES = frozenset(
-    {
-        # v4 audit1: the signal gate still included MAD, balance and learned
-        # execution headroom. Only flat, unpaused telemetry may migrate.
-        "6fb063111009d1553d153d28d0b6fa1e408fa8fcd0b34074b29eb40ac668922b",
-    }
-)
 MANUAL_STRATEGY_TAG = "manual"
 STRATEGY_EXECUTION_MODES = frozenset({"observe", "live"})
 DEFAULT_STRATEGY_EXECUTION_MODE = "observe"
 CANARY_SESSION_OBSERVING = "OBSERVING"
 CANARY_SESSION_ARMED = "ARMED"
-CANARY_SESSION_REVIEW_REQUIRED = "REVIEW_REQUIRED"
 CANARY_SESSION_HALTED = "HALTED"
 VAR_BASE_QTY_TICK = Decimal("0.000001")
-V5_OPEN_RATE_RANGE_BPS = Decimal("3.0")
-V5_CLOSE_RATE_RANGE_BPS = Decimal("4.0")
-V5_RATE_RANGE_WINDOW_MS = 5_000
-V5_CLOSE_RANGE_MAX_DEFERRAL_MS = 2_000
-GUARDED_CLOSE_RETRY_DELAY_SECONDS = 0.25
+OPEN_RATE_RANGE_BPS = Decimal("3.0")
+CLOSE_RATE_RANGE_BPS = Decimal("4.0")
+RATE_RANGE_WINDOW_MS = 5_000
+CLOSE_RANGE_MAX_DEFERRAL_MS = 2_000
+GUARDED_HEDGE_RETRY_DELAY_SECONDS = 0.25
 LIGHTER_IOC_LIMIT_EXHAUSTED = (
     "Lighter marginal depth price moved outside the configured IOC limit"
 )
@@ -1155,7 +1159,7 @@ def reject_removed_strategy_env() -> None:
         joined = ", ".join(present)
         raise RuntimeError(
             "Removed strategy environment variables detected: "
-            f"{joined}. Migrate to STRATEGY_EXECUTION_MODE and STRATEGY_* v1 settings."
+            f"{joined}. Migrate to the current STRATEGY_EXECUTION_MODE and STRATEGY_* settings."
         )
 
 
@@ -1292,7 +1296,7 @@ def strategy_config_from_env(current: StrategyConfig | None = None) -> StrategyC
     config = strategy_config_from_payload(payload, current=base)
     if config.early_exit_seconds >= config.max_hold_seconds:
         raise RuntimeError("STRATEGY_EARLY_EXIT_MINUTES must be below max hold")
-    fixed_v1_contract = {
+    fixed_strategy_contract = {
         "STRATEGY_REFERENCE_NOTIONAL_USD": (
             config.reference_notional_usd,
             DEFAULT_REFERENCE_NOTIONAL_USD,
@@ -1324,7 +1328,7 @@ def strategy_config_from_env(current: StrategyConfig | None = None) -> StrategyC
     }
     contract_errors = [
         f"{name} must remain {expected} for {ADAPTIVE_MODEL_VERSION} (got {actual})"
-        for name, (actual, expected) in fixed_v1_contract.items()
+        for name, (actual, expected) in fixed_strategy_contract.items()
         if actual != expected
     ]
     if contract_errors:
@@ -1339,21 +1343,20 @@ def adaptive_strategy_config_hash(
     config: StrategyConfig,
     *,
     model_hash: str,
+    execution_model_hash: str = "",
 ) -> str:
     """Hash every frozen runtime input that can change a strategy decision."""
 
     payload = {
         "model_version": ADAPTIVE_MODEL_VERSION,
         "model_hash": model_hash,
+        "execution_model_hash": execution_model_hash,
         "open_survival_policy_version": OPEN_SURVIVAL_POLICY_VERSION,
-        "open_survival_range_weight": {
-            side: decimal_to_str(value)
-            for side, value in OPEN_SURVIVAL_RANGE_WEIGHT.items()
-        },
-        "open_survival_imbalance_weight": {
-            side: decimal_to_str(value)
-            for side, value in OPEN_SURVIVAL_IMBALANCE_WEIGHT.items()
-        },
+        "open_hedge_recovery_policy_version": OPEN_HEDGE_RECOVERY_POLICY_VERSION,
+        "close_hold_floor_policy_version": CLOSE_HOLD_FLOOR_POLICY_VERSION,
+        "long_hold_floor_start_seconds": LONG_HOLD_FLOOR_START_SECONDS,
+        "long_hold_floor_step_seconds": LONG_HOLD_FLOOR_STEP_SECONDS,
+        "long_hold_floor_step_bps": decimal_to_str(LONG_HOLD_FLOOR_STEP_BPS),
         "reference_notional_usd": decimal_to_str(config.reference_notional_usd),
         "order_notional_usd": decimal_to_str(config.order_notional_usd),
         "buy_dynamic_threshold_min_pct": decimal_to_str(
@@ -2016,6 +2019,38 @@ def record_hold_seconds(record: OrderLifecycle, now: datetime | None = None) -> 
     return max(0, int((now_dt - filled_at).total_seconds()))
 
 
+def holding_interval_ms(
+    opened_at_ms: int | None,
+    closed_at_ms: int | None,
+) -> int | None:
+    if opened_at_ms is None or closed_at_ms is None or closed_at_ms < opened_at_ms:
+        return None
+    return closed_at_ms - opened_at_ms
+
+
+def beijing_day_bounds_ms(now: datetime | None = None) -> tuple[str, int, int]:
+    current = (now or datetime.now(timezone.utc)).astimezone(BEIJING_TIMEZONE)
+    start = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return (
+        start.date().isoformat(),
+        int(start.timestamp() * 1_000),
+        int(end.timestamp() * 1_000),
+    )
+
+
+def interval_overlap_ms(
+    opened_at_ms: int,
+    closed_at_ms: int,
+    range_start_ms: int,
+    range_end_ms: int,
+) -> int:
+    return max(
+        0,
+        min(closed_at_ms, range_end_ms) - max(opened_at_ms, range_start_ms),
+    )
+
+
 def opposite_var_order_side(side: str) -> str | None:
     side_n = side.strip().lower()
     if side_n == "buy":
@@ -2159,6 +2194,9 @@ class VariationalToLighterRuntime:
         self.logger.addHandler(file_handler)
         self.dashboard_console = Console()
         self.strategy_model = load_model_config(ADAPTIVE_MODEL_FILE)
+        self.execution_survival_model = load_execution_survival_model(
+            EXECUTION_SURVIVAL_MODEL_FILE
+        )
         self.strategy_config = strategy_config_from_env()
         if (
             self.strategy_config.reference_notional_usd
@@ -2171,6 +2209,7 @@ class VariationalToLighterRuntime:
         self.strategy_config_hash = adaptive_strategy_config_hash(
             self.strategy_config,
             model_hash=self.strategy_model.model_hash,
+            execution_model_hash=self.execution_survival_model.model_hash,
         )
 
         output_dir = OUTPUT_DIR.expanduser().resolve()
@@ -2288,12 +2327,14 @@ class VariationalToLighterRuntime:
         self.research_database_task: asyncio.Task[None] | None = None
         self._state_write_lock = asyncio.Lock()
         self._runtime_state_sig: str | None = None
+        self._runtime_state_loaded = True
 
         self.records: dict[str, OrderLifecycle] = {}
         self.record_order: deque[str] = deque()
         self._dashboard_round_batch: list[dict[str, Any]] = []
         self._dashboard_round_seen_keys: set[str] = set()
         self._dashboard_round_cursor_ms: int | None = None
+        self._dashboard_holding_ledger: dict[str, dict[str, Any]] = {}
         self.lighter_client_order_to_trade_key: dict[int, str] = {}
         self.lighter_order_fill_totals: dict[int, tuple[Decimal, Decimal]] = {}
         self.lighter_order_terminal_ids: set[int] = set()
@@ -2354,6 +2395,7 @@ class VariationalToLighterRuntime:
         self._strategy_history_resume_gap_ms: int | None = None
         self.strategy_sample_task: asyncio.Task[None] | None = None
         self.variational_refresh_task: asyncio.Task[None] | None = None
+        self._variational_refresh_lock = asyncio.Lock()
         self._variational_refresh_in_progress = False
         self.open_survival_session_id = f"survival-{uuid.uuid4().hex}"
         self._last_open_survival_key: tuple[Any, ...] | None = None
@@ -2453,6 +2495,7 @@ class VariationalToLighterRuntime:
         self._operations_dashboard_sequence = 0
         self._operator_action_lock = asyncio.Lock()
         self._operator_action_inflight = False
+        self._operator_action_owner: asyncio.Task[Any] | None = None
         self.reconcile_task: asyncio.Task[None] | None = None
         self.lighter_order_watchdog_task: asyncio.Task[None] | None = None
         self.var_intent_watchdog_task: asyncio.Task[None] | None = None
@@ -2490,32 +2533,86 @@ class VariationalToLighterRuntime:
         self._reconcile_pause_reason: str | None = None
         self._reconcile_mismatch_first_token: str | None = None
         self._reconcile_mismatch_first_monotonic: float | None = None
+        self._last_stale_portfolio_refresh_at = 0.0
 
     def _dashboard_round_strategy_id(self) -> str:
         return ":".join(
             (
                 str(DASHBOARD_ROUND_BATCH_VERSION),
                 self.strategy_model.model_hash,
-                self.strategy_config_hash,
             )
         )
 
     @staticmethod
     def _dashboard_round_row(trade_round: TradeRound) -> dict[str, Any]:
+        open_at = parse_iso_datetime(trade_round.open_record.var_fill_ts_iso)
         close_at = parse_iso_datetime(trade_round.close_record.var_fill_ts_iso)
+        opened_at_ms = int(open_at.timestamp() * 1_000) if open_at else None
+        closed_at_ms = int(close_at.timestamp() * 1_000) if close_at else None
+        held_ms = holding_interval_ms(opened_at_ms, closed_at_ms)
         long_var = trade_round.open_record.side.strip().lower() == "buy"
+        open_volume = (
+            abs(trade_round.open_record.var_fill_price * trade_round.open_record.qty)
+            if trade_round.open_record.var_fill_price is not None
+            else None
+        )
+        close_volume = (
+            abs(trade_round.close_record.var_fill_price * trade_round.close_record.qty)
+            if trade_round.close_record.var_fill_price is not None
+            else None
+        )
         return {
             "key": (
                 f"{trade_round.open_record.trade_key}|"
                 f"{trade_round.close_record.trade_key}"
             ),
-            "closedAtMs": int(close_at.timestamp() * 1000) if close_at else None,
+            "openedAtMs": opened_at_ms,
+            "closedAtMs": closed_at_ms,
+            "heldSeconds": held_ms // 1_000 if held_ms is not None else None,
             "directionKey": "long_var" if long_var else "short_var",
             "direction": "多 Var / 空 Lighter" if long_var else "空 Var / 多 Lighter",
             "openWear": decimal_to_str(trade_round.open_result.pnl),
             "closeWear": decimal_to_str(trade_round.close_result.pnl),
             "roundWear": decimal_to_str(trade_round.round_pnl),
+            "openVolumeUsd": decimal_to_str(open_volume),
+            "closeVolumeUsd": decimal_to_str(close_volume),
             "recovery": trade_round.recovery,
+        }
+
+    def _update_dashboard_holding_ledger_locked(self, row: dict[str, Any]) -> None:
+        opened_at_ms = row.get("openedAtMs")
+        closed_at_ms = row.get("closedAtMs")
+        if (
+            not isinstance(opened_at_ms, int)
+            or isinstance(opened_at_ms, bool)
+            or not isinstance(closed_at_ms, int)
+            or isinstance(closed_at_ms, bool)
+            or closed_at_ms < opened_at_ms
+        ):
+            return
+        key = str(row.get("key") or "").strip()
+        if not key:
+            return
+        self._dashboard_holding_ledger[key] = {
+            "key": key,
+            "asset": str(row.get("asset") or self.variational_ticker or "").upper(),
+            "openedAtMs": opened_at_ms,
+            "closedAtMs": closed_at_ms,
+            "openVolumeUsd": decimal_to_str(to_decimal(row.get("openVolumeUsd"))),
+            "closeVolumeUsd": decimal_to_str(to_decimal(row.get("closeVolumeUsd"))),
+            "roundWear": decimal_to_str(to_decimal(row.get("roundWear"))),
+        }
+        cutoff_ms = int(
+            (
+                datetime.now(timezone.utc)
+                - timedelta(days=DASHBOARD_HOLDING_LEDGER_RETENTION_DAYS)
+            ).timestamp()
+            * 1_000
+        )
+        self._dashboard_holding_ledger = {
+            ledger_key: ledger_row
+            for ledger_key, ledger_row in self._dashboard_holding_ledger.items()
+            if int(ledger_row["closedAtMs"]) >= cutoff_ms
         }
 
     def _merge_dashboard_rounds_locked(
@@ -2530,6 +2627,8 @@ class VariationalToLighterRuntime:
             if trade_round.round_pnl is None:
                 continue
             row = self._dashboard_round_row(trade_round)
+            row["asset"] = trade_round.open_record.asset
+            self._update_dashboard_holding_ledger_locked(row)
             key = str(row["key"])
             if key in positions:
                 self._dashboard_round_batch[positions[key]] = row
@@ -2557,10 +2656,10 @@ class VariationalToLighterRuntime:
                 )
 
     def _restore_dashboard_round_batch(self, payload: dict[str, Any]) -> None:
-        if (
-            payload.get("dashboard_round_strategy_id")
-            != self._dashboard_round_strategy_id()
-        ):
+        strategy_id = self._dashboard_round_strategy_id()
+        saved_strategy_id = payload.get("dashboard_round_strategy_id")
+        legacy_strategy_id = f"{strategy_id}:{payload.get('strategy_config_hash')}"
+        if saved_strategy_id not in {strategy_id, legacy_strategy_id}:
             return
         raw_batch = payload.get("dashboard_round_batch")
         raw_cursor = payload.get("dashboard_round_cursor_ms")
@@ -2568,9 +2667,26 @@ class VariationalToLighterRuntime:
             return
         restored: list[dict[str, Any]] = []
         for row in raw_batch[-DASHBOARD_ROUND_BATCH_SIZE:]:
+            if not isinstance(row, dict):
+                continue
+            opened_at_ms = row.get("openedAtMs")
+            closed_at_ms = row.get("closedAtMs")
+            timestamps_valid = all(
+                value is None
+                or (
+                    isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and value >= 0
+                )
+                for value in (opened_at_ms, closed_at_ms)
+            )
+            held_ms = (
+                holding_interval_ms(opened_at_ms, closed_at_ms)
+                if timestamps_valid
+                else None
+            )
             if (
-                not isinstance(row, dict)
-                or not str(row.get("key") or "").strip()
+                not str(row.get("key") or "").strip()
                 or row.get("directionKey") not in {"long_var", "short_var"}
                 or not isinstance(row.get("direction"), str)
                 or not isinstance(row.get("recovery"), bool)
@@ -2578,9 +2694,27 @@ class VariationalToLighterRuntime:
                     to_decimal(row.get(key)) is None
                     for key in ("openWear", "closeWear", "roundWear")
                 )
+                or not timestamps_valid
+                or (
+                    opened_at_ms is not None
+                    and closed_at_ms is not None
+                    and held_ms is None
+                )
             ):
                 continue
-            restored.append(copy.deepcopy(row))
+            restored_row = copy.deepcopy(row)
+            restored_row["openedAtMs"] = opened_at_ms
+            restored_row["closedAtMs"] = closed_at_ms
+            restored_row["heldSeconds"] = (
+                held_ms // 1_000 if held_ms is not None else None
+            )
+            restored_row["openVolumeUsd"] = decimal_to_str(
+                to_decimal(row.get("openVolumeUsd"))
+            )
+            restored_row["closeVolumeUsd"] = decimal_to_str(
+                to_decimal(row.get("closeVolumeUsd"))
+            )
+            restored.append(restored_row)
         self._dashboard_round_batch = restored
         self._dashboard_round_seen_keys = {
             str(row["key"]) for row in restored
@@ -2593,7 +2727,55 @@ class VariationalToLighterRuntime:
             else None
         )
 
+    def _restore_dashboard_holding_ledger(self, payload: dict[str, Any]) -> None:
+        raw_ledger = payload.get("dashboard_holding_ledger")
+        if not isinstance(raw_ledger, list):
+            return
+        restored: dict[str, dict[str, Any]] = {}
+        cutoff_ms = int(
+            (
+                datetime.now(timezone.utc)
+                - timedelta(days=DASHBOARD_HOLDING_LEDGER_RETENTION_DAYS)
+            ).timestamp()
+            * 1_000
+        )
+        for row in raw_ledger:
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get("key") or "").strip()
+            opened_at_ms = row.get("openedAtMs")
+            closed_at_ms = row.get("closedAtMs")
+            if (
+                not key
+                or not isinstance(opened_at_ms, int)
+                or isinstance(opened_at_ms, bool)
+                or not isinstance(closed_at_ms, int)
+                or isinstance(closed_at_ms, bool)
+                or closed_at_ms < opened_at_ms
+                or closed_at_ms < cutoff_ms
+            ):
+                continue
+            restored[key] = {
+                "key": key,
+                "asset": str(row.get("asset") or "").upper(),
+                "openedAtMs": opened_at_ms,
+                "closedAtMs": closed_at_ms,
+                "openVolumeUsd": decimal_to_str(
+                    to_decimal(row.get("openVolumeUsd"))
+                ),
+                "closeVolumeUsd": decimal_to_str(
+                    to_decimal(row.get("closeVolumeUsd"))
+                ),
+                "roundWear": decimal_to_str(to_decimal(row.get("roundWear"))),
+            }
+        self._dashboard_holding_ledger = restored
+
     async def persist_runtime_state(self) -> None:
+        if not self._runtime_state_loaded:
+            self.logger.warning(
+                "Skipped runtime-state write before persisted state was restored"
+            )
+            return
         # Serialize the complete snapshot-and-write operation.  Taking a
         # snapshot before waiting for the write lock allows an older caller to
         # overwrite a newer intent/record snapshot when the two calls race.
@@ -2713,6 +2895,9 @@ class VariationalToLighterRuntime:
                     "dashboard_round_batch": copy.deepcopy(
                         self._dashboard_round_batch
                     ),
+                    "dashboard_holding_ledger": copy.deepcopy(
+                        list(self._dashboard_holding_ledger.values())
+                    ),
                 }
             state_sig = json.dumps(
                 payload,
@@ -2732,7 +2917,6 @@ class VariationalToLighterRuntime:
                 await asyncio.to_thread(
                     write_execution_sample_records,
                     EXECUTION_SAMPLES_FILE,
-                    EXECUTION_SAMPLE_VERSION,
                     snapshot_asset,
                     sample_snapshot,
                 )
@@ -2884,6 +3068,7 @@ class VariationalToLighterRuntime:
         tmp_path = path.with_name(f".{path.name}.tmp")
         with tmp_path.open("w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=True, indent=2)
+        os.chmod(tmp_path, 0o600)
         os.replace(tmp_path, path)
 
     async def load_execution_samples_for_asset(self, asset: str) -> None:
@@ -2897,7 +3082,6 @@ class VariationalToLighterRuntime:
         stored_records = await asyncio.to_thread(
             read_execution_sample_records,
             EXECUTION_SAMPLES_FILE,
-            EXECUTION_SAMPLE_VERSION,
             asset,
             notional_usd=self.strategy_config.order_notional_usd,
         )
@@ -2913,6 +3097,7 @@ class VariationalToLighterRuntime:
 
     async def load_runtime_state(self, asset: str) -> bool:
         if not RUNTIME_STATE_FILE.exists():
+            self._runtime_state_loaded = True
             return False
         try:
             payload = await asyncio.to_thread(self._read_json_file, RUNTIME_STATE_FILE)
@@ -2943,48 +3128,19 @@ class VariationalToLighterRuntime:
                     "Pre-v2 runtime state contains a position or pending intent; "
                     "adaptive startup is refused until the account is reconciled to zero"
                 )
+            self._runtime_state_loaded = True
             return False
         model_state_mismatch = (
             payload.get("strategy_model") != ADAPTIVE_MODEL_VERSION
             or payload.get("strategy_model_hash") != self.strategy_model.model_hash
         )
-        manual_only_model_migration = bool(
-            model_state_mismatch
-            and raw_intent is None
-            and raw_rows
-            and all(
-                isinstance(row, dict)
-                and row.get("strategy_tag") == MANUAL_STRATEGY_TAG
-                for row in raw_rows
-            )
-        )
-        saved_pause_reason = str(payload.get("automation_pause_reason") or "")
-        migration_reconciliation_pause = bool(
-            manual_only_model_migration
-            and payload.get("automation_paused") is True
-            and saved_pause_reason.startswith("Account reconciliation failed:")
-        )
-        flat_v4_telemetry_migration = bool(
-            model_state_mismatch
-            and not has_saved_exposure
-            and payload.get("strategy_model") == ADAPTIVE_MODEL_VERSION
-            and payload.get("strategy_model_hash")
-            in MIGRATABLE_FLAT_V4_MODEL_HASHES
-        )
         if model_state_mismatch:
-            if has_saved_exposure and not manual_only_model_migration:
-                raise RuntimeError(
-                    f"Runtime state model does not match {ADAPTIVE_MODEL_VERSION}; "
-                    "startup with exposure is refused"
-                )
-            if bool(payload.get("automation_paused")) and not migration_reconciliation_pause:
-                raise RuntimeError(
-                    "Runtime state model changed but contains an automation safety pause; "
-                    "automatic reset is refused"
-                )
-            if not flat_v4_telemetry_migration and not manual_only_model_migration:
-                return False
+            raise RuntimeError(
+                f"Runtime state model does not match {ADAPTIVE_MODEL_VERSION}; "
+                "run the offline state converter before startup"
+            )
 
+        self._restore_dashboard_holding_ledger(payload)
         self._restore_dashboard_round_batch(payload)
 
         loaded_records: list[OrderLifecycle] = []
@@ -3723,13 +3879,10 @@ class VariationalToLighterRuntime:
             if saved_state not in {
                 CANARY_SESSION_OBSERVING,
                 CANARY_SESSION_ARMED,
-                CANARY_SESSION_REVIEW_REQUIRED,
                 CANARY_SESSION_HALTED,
             }:
                 raise RuntimeError("Runtime state canary state is invalid")
-            # Keep genuine safety pauses derived above, but do not restore the
-            # former one-shot/loss-limit REVIEW_REQUIRED or HALTED gates. PnL
-            # counters remain historical metrics and never disable live opens.
+            # PnL counters are historical metrics and never disable live opens.
             if self.automation_paused or self.pending_var_intent is not None:
                 self._canary_session_state = CANARY_SESSION_HALTED
             elif saved_state == CANARY_SESSION_ARMED:
@@ -3739,6 +3892,7 @@ class VariationalToLighterRuntime:
         elif self.strategy_config.execution_mode == "live":
             self._canary_session_state = CANARY_SESSION_OBSERVING
         self._runtime_state_sig = None
+        self._runtime_state_loaded = True
         self.logger.info(
             "Restored %s unfinished records for %s; dropped %s completed-history records",
             len(recovery_records),
@@ -4778,7 +4932,12 @@ class VariationalToLighterRuntime:
             await self.persist_runtime_state()
         return False
 
-    async def reconcile_accounts(self, *, allow_resume: bool = False) -> bool:
+    async def reconcile_accounts(
+        self,
+        *,
+        allow_resume: bool = False,
+        after_page_refresh: bool = False,
+    ) -> bool:
         if not self.variational_ticker:
             return False
         if self.transition_in_progress() and not allow_resume:
@@ -4908,6 +5067,8 @@ class VariationalToLighterRuntime:
                 self._reconcile_failure_count = 2
                 mismatch_started = self._reconcile_mismatch_first_monotonic
                 if (
+                    after_page_refresh
+                    and
                     mismatch_started is not None
                     and now_monotonic - mismatch_started
                     >= RECONCILE_MISMATCH_CONFIRM_SECONDS
@@ -5027,7 +5188,9 @@ class VariationalToLighterRuntime:
             await asyncio.sleep(self.strategy_config.reconcile_interval_seconds)
             try:
                 self.log_lighter_order_entry_transition()
-                await self.reconcile_accounts()
+                matched = await self.reconcile_accounts()
+                if not matched:
+                    await self.refresh_stale_variational_portfolio_if_safe()
                 await self.prune_settled_execution_state()
             except asyncio.CancelledError:
                 raise
@@ -5260,7 +5423,10 @@ class VariationalToLighterRuntime:
             intent.firm_qty = firm_qty
             intent.firm_target_notional_usd = firm_target_notional
             intent.firm_guard_pnl = to_decimal(firm_quote.get("guardPnl"))
-            intent.firm_required_pnl = to_decimal(firm_quote.get("guardMinPnl"))
+            intent.firm_required_pnl = to_decimal(
+                firm_quote.get("hedgeMinPnl")
+                or firm_quote.get("guardMinPnl")
+            )
             intent.execution_reserve_usd = to_decimal(firm_quote.get("executionReserveUsd"))
             intent.lighter_vwap = to_decimal(firm_quote.get("lighterVwap"))
             intent.lighter_quote_age_ms = to_int(firm_quote.get("lighterQuoteAgeMs"))
@@ -5563,6 +5729,34 @@ class VariationalToLighterRuntime:
                     recovery_outcome = (
                         await self.inspect_pending_var_intent_from_portfolio()
                     )
+                    if recovery_outcome is VarPortfolioRecoveryOutcome.UNKNOWN:
+                        try:
+                            await self.append_order_log(
+                                "variational_commit_confirmation_refresh_started",
+                                {
+                                    "request_id": intent.request_id,
+                                    "trace_id": intent.trace_id,
+                                    "phase": intent.phase,
+                                    "side": intent.side,
+                                },
+                            )
+                            await self.refresh_variational_page_when_safe()
+                            intent_time = parse_iso_datetime(
+                                intent.prepared_at_iso or intent.sent_at_iso or ""
+                            )
+                            await self.wait_for_authoritative_portfolio_after(
+                                intent_time
+                            )
+                            if self.pending_var_intent is not intent:
+                                continue
+                            recovery_outcome = (
+                                await self.inspect_pending_var_intent_from_portfolio()
+                            )
+                        except Exception as exc:
+                            self.logger.warning(
+                                "Priority Var refresh after missing Commit confirmation failed: %s",
+                                exc,
+                            )
                     if (
                         recovery_outcome
                         is VarPortfolioRecoveryOutcome.CONFIRMED_NOT_FILLED
@@ -5691,10 +5885,16 @@ class VariationalToLighterRuntime:
             and self.last_reconcile_outcome
             in {AccountReconcileOutcome.STALE, AccountReconcileOutcome.UNKNOWN}
         )
+        if not self._runtime_state_loaded:
+            setattr(self, status_target, "restoring persisted runtime state")
+            return False
         if self.automation_paused:
             return False
         if self._variational_refresh_in_progress:
             setattr(self, status_target, "refreshing Variational page")
+            return False
+        if self._operator_action_inflight:
+            setattr(self, status_target, "operator action in progress")
             return False
         if self._asset_switch_in_progress:
             setattr(self, status_target, "switching market")
@@ -5733,18 +5933,13 @@ class VariationalToLighterRuntime:
             return "automatic Lighter hedge is disabled"
         if self.operator_open_paused:
             return "new opens are paused by operator"
+        if self._operator_action_inflight:
+            return "operator action is in progress"
         if self._variational_refresh_in_progress:
             return "scheduled Variational page refresh is in progress"
         if self.automation_paused:
             self._canary_session_state = CANARY_SESSION_HALTED
             return "automation is paused"
-        if self._canary_session_state in {
-            CANARY_SESSION_REVIEW_REQUIRED,
-            CANARY_SESSION_HALTED,
-        }:
-            # Normalize legacy one-shot/loss-limit state. Real safety pauses
-            # are represented by automation_paused and were handled above.
-            self._canary_session_state = CANARY_SESSION_OBSERVING
         if self.active_parameter_epoch is None:
             return "parameter epoch is not yet available"
         if self.active_parameter_epoch.window_source != "live" or not all(
@@ -6030,10 +6225,9 @@ class VariationalToLighterRuntime:
         *,
         asset: str,
         reference_notional_usd: Decimal,
-        order_notional_usd: Decimal,
         now_ms: int,
         minimum_timestamp_ms: int | None = None,
-    ) -> tuple[str, list[tuple[int, DirectionalRates]], int]:
+    ) -> tuple[str, list[tuple[int, DirectionalRates, bool]], int]:
         """Read the latest qualified contiguous session without trusting prices.
 
         Historical rows only seed robust rate statistics.  They never create a
@@ -6045,7 +6239,7 @@ class VariationalToLighterRuntime:
 
         if not path.is_file():
             return "sample_file_missing", [], 0
-        valid: list[tuple[int, DirectionalRates]] = []
+        valid: list[tuple[int, DirectionalRates, str | None]] = []
         try:
             with path.open("r", encoding="utf-8") as handle:
                 for line in handle:
@@ -6064,8 +6258,6 @@ class VariationalToLighterRuntime:
                         continue
                     if to_decimal(row.get("reference_notional_usd")) != reference_notional_usd:
                         continue
-                    if to_decimal(row.get("order_notional_usd")) != order_notional_usd:
-                        continue
                     timestamp_ms = row.get("sample_timestamp_ms")
                     buy = to_decimal(row.get("reference_buy_rate"))
                     sell = to_decimal(row.get("reference_sell_rate"))
@@ -6082,7 +6274,11 @@ class VariationalToLighterRuntime:
                     ):
                         continue
                     valid.append(
-                        (timestamp_ms, DirectionalRates(buy=buy, sell=sell))
+                        (
+                            timestamp_ms,
+                            DirectionalRates(buy=buy, sell=sell),
+                            str(row.get("session_id") or "").strip() or None,
+                        )
                     )
         except OSError as exc:
             return f"sample_file_unreadable:{type(exc).__name__}", [], 0
@@ -6094,18 +6290,27 @@ class VariationalToLighterRuntime:
             return "history_clock_from_future", [], 0
         initial_gap_ms = max(0, now_ms - latest_ms)
         if initial_gap_ms > STRATEGY_HISTORY_RESUME_MAX_GAP_MS:
-            return "history_stale_over_5m", [], initial_gap_ms
+            return "history_stale_over_2m", [], initial_gap_ms
 
-        # Keep only the newest internally-contiguous session.  Earlier process
-        # runs and all in-session gaps >=60s remain hard boundaries.
-        session: list[tuple[int, DirectionalRates]] = [valid[-1]]
-        newer_ms = latest_ms
+        # Keep only the newest qualified sequence.  A live feed gap >=60s is
+        # still a hard boundary.  A process restart may bridge up to two
+        # minutes because no samples can be emitted while Runtime is down.
+        session = [valid[-1]]
+        newer_ms, _, newer_session_id = valid[-1]
         for sample in reversed(valid[:-1]):
-            timestamp_ms = sample[0]
-            if newer_ms - timestamp_ms >= STRATEGY_MAX_SAMPLE_GAP_MS:
+            timestamp_ms, _, session_id = sample
+            gap_ms = newer_ms - timestamp_ms
+            process_restart = bool(
+                session_id and newer_session_id and session_id != newer_session_id
+            )
+            if (
+                gap_ms > STRATEGY_HISTORY_RESUME_MAX_GAP_MS
+                if process_restart
+                else gap_ms >= STRATEGY_MAX_SAMPLE_GAP_MS
+            ):
                 break
             session.append(sample)
-            newer_ms = timestamp_ms
+            newer_ms, newer_session_id = timestamp_ms, session_id
         session.reverse()
         coverage_ms = session[-1][0] - session[0][0]
         density = (
@@ -6130,7 +6335,24 @@ class VariationalToLighterRuntime:
             if coverage_ms >= STRATEGY_STATISTICS_WINDOW_MS
             else "pending_partial_history"
         )
-        return resume_state, session[boundary_index:], initial_gap_ms
+        selected = session[boundary_index:]
+        return (
+            resume_state,
+            [
+                (
+                    timestamp_ms,
+                    rates,
+                    bool(
+                        index
+                        and session_id
+                        and selected[index - 1][2]
+                        and session_id != selected[index - 1][2]
+                    ),
+                )
+                for index, (timestamp_ms, rates, session_id) in enumerate(selected)
+            ],
+            initial_gap_ms,
+        )
 
     def _strategy_sample_session_cutoff_ms(self, asset: str) -> int | None:
         path = self.strategy_market_samples_file
@@ -6167,7 +6389,6 @@ class VariationalToLighterRuntime:
             path,
             asset=asset,
             reference_notional_usd=self.strategy_config.reference_notional_usd,
-            order_notional_usd=self.strategy_config.order_notional_usd,
             now_ms=now_ms,
             minimum_timestamp_ms=minimum_timestamp_ms,
         )
@@ -6175,8 +6396,12 @@ class VariationalToLighterRuntime:
         self._strategy_history_resume_gap_ms = initial_gap_ms
         if not samples:
             return False
-        for timestamp_ms, rates in samples:
-            self.strategy_window_store.add(timestamp_ms=timestamp_ms, rates=rates)
+        for timestamp_ms, rates, bridges_previous in samples:
+            self.strategy_window_store.add(
+                timestamp_ms=timestamp_ms,
+                rates=rates,
+                bridges_previous=bridges_previous,
+            )
             for side in StrategySide:
                 self._opportunity_samples[side].append(
                     OpportunitySample(timestamp_ms, rates.for_side(side))
@@ -6266,12 +6491,28 @@ class VariationalToLighterRuntime:
                 self._asset_switch_in_progress = False
 
     async def wait_for_variational_ready(self) -> None:
-        deadline = time.time() + READY_TIMEOUT_SECONDS
-        while not self.stop_flag and time.time() < deadline:
+        started_at = time.monotonic()
+        deadline = started_at + READY_TIMEOUT_SECONDS
+        refresh_attempted = False
+        while not self.stop_flag and time.monotonic() < deadline:
             state = await self.runtime.monitor.get_trading_state()
             hb_age = state.get("heartbeat_age")
             if hb_age is not None and hb_age <= HEARTBEAT_STALE_SECONDS:
                 return
+            if (
+                not refresh_attempted
+                and time.monotonic() - started_at >= 3.0
+                and await self.runtime.command_broker.extension_connected()
+            ):
+                refresh_attempted = True
+                try:
+                    await self._refresh_variational_page_via_cdp()
+                    return
+                except Exception as exc:
+                    self.logger.warning(
+                        "Startup Variational page refresh failed: %s",
+                        exc,
+                    )
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
         raise RuntimeError("Timed out waiting for Variational events stream heartbeat")
 
@@ -6626,6 +6867,7 @@ class VariationalToLighterRuntime:
         overfill_reason: str | None = None
         should_pause = False
         should_retry = False
+        open_recovery_queued = False
         event_name = "lighter_order_update"
 
         async with self._record_lock:
@@ -6730,9 +6972,17 @@ class VariationalToLighterRuntime:
                         f"Waiting remaining Lighter IOC updates: filled {total_base}/{lighter_target or record.qty}"
                     )
                 else:
+                    open_recovery_queued = bool(
+                        not record.lighter_reduce_only
+                        and record.strategy_phase == "open"
+                        and record.strategy_tag == ADAPTIVE_MODEL_VERSION
+                        and len(record.lighter_client_order_ids)
+                        == self.strategy_config.lighter_hedge_max_attempts
+                    )
                     attempts_left = (
                         len(record.lighter_client_order_ids)
                         < self.strategy_config.lighter_hedge_max_attempts
+                        or open_recovery_queued
                     )
                     record.hedge_status = (
                         "retrying" if attempts_left else ("partial" if total_base > 0 else "error")
@@ -6781,6 +7031,20 @@ class VariationalToLighterRuntime:
             executed_at=order.get("executed_at"),
             transaction_time=order.get("transaction_time"),
         )
+        if open_recovery_queued:
+            self.trace_event(
+                "lighter_guarded_open_recovery_queued",
+                trace_id,
+                trade_key=record.trade_key,
+                protected_attempts=len(record.lighter_client_order_ids),
+                remaining_qty=(
+                    max(
+                        Decimal("0"),
+                        (lighter_target or Decimal("0"))
+                        - (record.lighter_filled_qty or Decimal("0")),
+                    )
+                ),
+            )
         if event_name == "lighter_fill":
             self.trace_event(
                 "lighter_fill",
@@ -7574,18 +7838,40 @@ class VariationalToLighterRuntime:
             for side in StrategySide
         }
         snapshots: list[dict[str, Any]] = []
-        for target_ms in OPEN_SURVIVAL_HORIZONS_MS:
+        feature_snapshots: list[dict[str, Any]] = []
+        targets = sorted(
+            set(OPEN_SURVIVAL_HORIZONS_MS) | set(MICROSTRUCTURE_HORIZONS_MS)
+        )
+        for target_ms in targets:
             delay = target_ms / 1_000 - (time.monotonic() - started)
             if delay > 0:
                 await asyncio.sleep(delay)
-            snapshots.append(
-                await self._open_survival_lighter_snapshot(
+            if target_ms in OPEN_SURVIVAL_HORIZONS_MS:
+                snapshots.append(await self._open_survival_lighter_snapshot(
                     frame=frame,
                     thresholds=thresholds,
                     target_offset_ms=target_ms,
                     started=started,
+                ))
+            if target_ms in MICROSTRUCTURE_HORIZONS_MS:
+                observed = time.monotonic()
+                async with self.lighter_order_book_lock:
+                    depth = lighter_depth_features(
+                        self.lighter_order_book,
+                        self.lighter_best_bid,
+                        self.lighter_best_ask,
+                    )
+                    features = self.lighter_microstructure_features(now=observed)
+                horizon = features.get("horizons_ms", {}).get(str(target_ms), {})
+                feature_snapshots.append(
+                    {
+                        "target_offset_ms": target_ms,
+                        "actual_offset_ms": int((observed - started) * 1_000),
+                        "depth": depth,
+                        "microprice_bps": features.get("microprice_bps"),
+                        **horizon,
+                    }
                 )
-            )
         self.trace_event(
             OPEN_SURVIVAL_OBSERVATION_VERSION,
             None,
@@ -7657,6 +7943,7 @@ class VariationalToLighterRuntime:
                 for side in StrategySide
             },
             microstructure=microstructure,
+            feature_snapshots=feature_snapshots,
             windows=windows,
             snapshots=snapshots,
         )
@@ -7703,11 +7990,21 @@ class VariationalToLighterRuntime:
             )
             for side in StrategySide
         }
+        microstructure = self.lighter_microstructure_features(now=started)
         survival_reserve_bps = {
             side.value: self.effective_open_execution_headroom_bps(
                 side.value,
                 frame.actual_notional_usd,
+                current_rate=frame.reference_rates.for_side(side),
+                now_ms=frame.captured_at_ms,
             )
+            for side in StrategySide
+        }
+        microstructure_pass = {
+            side.value: self.execution_survival_microstructure_allows(
+                side.value,
+                microstructure=microstructure,
+            )[0]
             for side in StrategySide
         }
         policy_pass_sides = tuple(
@@ -7715,6 +8012,7 @@ class VariationalToLighterRuntime:
             for side in StrategySide
             if side.value in threshold_pass_sides
             and ranges[side] is not None
+            and microstructure_pass[side.value]
             and min(
                 frame.reference_rates.for_side(side),
                 frame.actual_rates.for_side(side),
@@ -7754,7 +8052,7 @@ class VariationalToLighterRuntime:
                 threshold_pass_sides=threshold_pass_sides,
                 policy_pass_sides=policy_pass_sides,
                 survival_reserve_bps=survival_reserve_bps,
-                microstructure=self.lighter_microstructure_features(now=started),
+                microstructure=microstructure,
                 started=started,
             ),
             name="open-survival-observation",
@@ -7820,6 +8118,10 @@ class VariationalToLighterRuntime:
                             "sample_timestamp_ms": recorded_ms,
                             "sampled_at": utc_now(),
                             "runtime_build": RUNTIME_BUILD,
+                            "asset": self.variational_ticker,
+                            "mode": self.strategy_config.execution_mode,
+                            "model_version": self.strategy_model.model_version,
+                            "sample_kind": "market_background",
                         }
                     )
                 return False
@@ -7863,12 +8165,12 @@ class VariationalToLighterRuntime:
                     }
                     self._last_recorded_strategy_sample_ms = None
                     self._strategy_history_resume_pending = False
-                    self._strategy_history_resume_state = "rejected_gap_over_5m"
+                    self._strategy_history_resume_state = "rejected_gap_over_2m"
                     self._strategy_history_resume_gap_ms = max(0, resume_gap_ms)
                     self._strategy_history_resume_samples = 0
                     self._strategy_history_resume_coverage_ms = 0
                     self._invalidate_adaptive_parameters(
-                        "strategy_history_resume_gap_over_5m"
+                        "strategy_history_resume_gap_over_2m"
                     )
                 elif resume_gap_ms >= 0:
                     bridge_history_gap = resume_gap_ms >= STRATEGY_MAX_SAMPLE_GAP_MS
@@ -7902,6 +8204,10 @@ class VariationalToLighterRuntime:
                         "sample_timestamp_ms": recorded_ms,
                         "sampled_at": utc_now(),
                         "runtime_build": RUNTIME_BUILD,
+                        "asset": frame.asset,
+                        "mode": self.strategy_config.execution_mode,
+                        "model_version": self.strategy_model.model_version,
+                        "sample_kind": "market_background",
                     }
                 )
             if record_sample:
@@ -8216,7 +8522,7 @@ class VariationalToLighterRuntime:
         close callers may apply their bounded safety deferral instead.
         """
 
-        cutoff_ms = now_ms - V5_RATE_RANGE_WINDOW_MS
+        cutoff_ms = now_ms - RATE_RANGE_WINDOW_MS
         recent: list[OpportunitySample] = []
         for sample in reversed(self._opportunity_samples[side]):
             if sample.timestamp_ms > now_ms:
@@ -8344,6 +8650,7 @@ class VariationalToLighterRuntime:
         base_amount = 0
         price_i = 0
         prepared_primary_order = False
+        force_open_hedge_recovery = False
         async with self._record_lock:
             already_filled = record.lighter_filled_qty or Decimal("0")
             if record.hedge_status == "overfilled":
@@ -8448,6 +8755,13 @@ class VariationalToLighterRuntime:
                         record.hedge_error = None
                 else:
                     base_amount = latest_base_amount
+                    force_open_hedge_recovery = bool(
+                        not record.lighter_reduce_only
+                        and record.strategy_phase == "open"
+                        and record.strategy_tag == ADAPTIVE_MODEL_VERSION
+                        and len(record.lighter_client_order_ids)
+                        > self.strategy_config.lighter_hedge_max_attempts
+                    )
                     # Fill handling owns _record_lock.  Holding it while the
                     # in-memory book snapshot is captured binds the residual
                     # amount and depth nonce to one pre-send observation.
@@ -8457,6 +8771,7 @@ class VariationalToLighterRuntime:
                         base_amount=base_amount,
                         market_generation=generation,
                         market_index=market_index,
+                        force_open_hedge_recovery=force_open_hedge_recovery,
                     )
             if submission_superseded:
                 tx_response = None
@@ -8468,31 +8783,56 @@ class VariationalToLighterRuntime:
                         and record.strategy_phase == "close"
                         and record.strategy_tag == ADAPTIVE_MODEL_VERSION
                     )
-                    guarded_close_retry = (
-                        guarded_strategy_close
-                        and revalidation_error != LIGHTER_IOC_LIMIT_EXHAUSTED
+                    guarded_strategy_open = bool(
+                        not record.lighter_reduce_only
+                        and record.strategy_phase == "open"
+                        and record.strategy_tag == ADAPTIVE_MODEL_VERSION
+                    )
+                    guarded_retry = (
+                        (
+                            guarded_strategy_open
+                            or (
+                                guarded_strategy_close
+                                and revalidation_error
+                                != LIGHTER_IOC_LIMIT_EXHAUSTED
+                            )
+                        )
                         and len(record.lighter_client_order_ids)
                         < self.strategy_config.lighter_hedge_max_attempts
                     )
-                    if guarded_close_retry:
+                    if guarded_retry:
+                        retry_event = (
+                            "lighter_guarded_open_retry"
+                            if guarded_strategy_open
+                            else "lighter_guarded_close_retry"
+                        )
                         async with self._record_lock:
+                            # Revalidation rejected this client id before it
+                            # reached Lighter.  Record the zero-fill attempt as
+                            # terminal so a later recovery report cannot wait
+                            # forever for an order that never existed.
+                            self.lighter_order_terminal_ids.add(client_order_id)
+                            self.lighter_order_fill_totals.setdefault(
+                                client_order_id,
+                                (Decimal("0"), Decimal("0")),
+                            )
                             record.hedge_status = "retrying"
                             record.hedge_error = revalidation_error
                             payload = record.to_payload()
                         self.lighter_requeue_after_task_keys.add(record.trade_key)
                         self.trace_event(
-                            "lighter_guarded_close_retry",
+                            retry_event,
                             trace_id,
                             trade_key=record.trade_key,
                             error=revalidation_error,
                             attempt=len(record.lighter_client_order_ids),
                         )
                         await self.append_order_log(
-                            "lighter_guarded_close_retry",
+                            retry_event,
                             payload,
                         )
                         await asyncio.sleep(
-                            GUARDED_CLOSE_RETRY_DELAY_SECONDS
+                            GUARDED_HEDGE_RETRY_DELAY_SECONDS
                         )
                         return
                     if guarded_strategy_close:
@@ -8520,6 +8860,36 @@ class VariationalToLighterRuntime:
                                 record.lighter_client_order_ids
                             ),
                             reason=revalidation_error,
+                        )
+                    elif guarded_strategy_open and not force_open_hedge_recovery:
+                        dispatch_snapshot, recovery_error = (
+                            await self.capture_lighter_hedge_dispatch_snapshot(
+                                record=record,
+                                lighter_side=side,
+                                base_amount=base_amount,
+                                market_generation=generation,
+                                market_index=market_index,
+                                force_open_hedge_recovery=True,
+                            )
+                        )
+                        if recovery_error is not None:
+                            await self.fail_lighter_hedge(
+                                record,
+                                recovery_error,
+                            )
+                            return
+                        self.trace_event(
+                            "lighter_guarded_open_recovery",
+                            trace_id,
+                            trade_key=record.trade_key,
+                            protected_attempts=len(
+                                record.lighter_client_order_ids
+                            ),
+                            reason=revalidation_error,
+                            economic_limit_bypassed=True,
+                            configured_slippage_bps=(
+                                self.strategy_config.hedge_slippage_bps
+                            ),
                         )
                     else:
                         await self.fail_lighter_hedge(
@@ -8791,34 +9161,44 @@ class VariationalToLighterRuntime:
         if candidate is None:
             self.last_auto_var_order_status = f"{decision.action.value}: {decision.reason}"
             return None
-        if candidate.epoch.model_version in {
-            "adaptive-median-v5",
-            "adaptive-median-v6",
-        }:
-            now_ms = time.time_ns() // 1_000_000
-            rate_range = self.recent_directional_rate_range(
-                candidate.direction,
-                now_ms=now_ms,
-                current_rate=candidate.reference_rate,
+        now_ms = time.time_ns() // 1_000_000
+        rate_range = self.recent_directional_rate_range(
+            candidate.direction,
+            now_ms=now_ms,
+            current_rate=candidate.reference_rate,
+        )
+        if rate_range is None:
+            self._selected_open_candidate = None
+            self.last_auto_var_order_status = (
+                "NO_ACTION: opening five-second rate range is not ready"
             )
-            if rate_range is None:
-                self._selected_open_candidate = None
-                self.last_auto_var_order_status = (
-                    "NO_ACTION: opening five-second rate range is not ready"
-                )
-                return None
-            maximum_range = V5_OPEN_RATE_RANGE_BPS / Decimal("10000")
-            if rate_range > maximum_range:
-                self._selected_open_candidate = None
-                self.last_auto_var_order_status = (
-                    "NO_ACTION: opening five-second rate range "
-                    f"{rate_range * Decimal('10000'):.2f}bps exceeds "
-                    f"{V5_OPEN_RATE_RANGE_BPS}bps"
-                )
-                return None
+            return None
+        maximum_range = OPEN_RATE_RANGE_BPS / Decimal("10000")
+        if rate_range > maximum_range:
+            self._selected_open_candidate = None
+            self.last_auto_var_order_status = (
+                "NO_ACTION: opening five-second rate range "
+                f"{rate_range * Decimal('10000'):.2f}bps exceeds "
+                f"{OPEN_RATE_RANGE_BPS}bps"
+            )
+            return None
+        microstructure_allowed, adverse_count, _ = (
+            self.execution_survival_microstructure_allows(
+                candidate.direction.value
+            )
+        )
+        if not microstructure_allowed:
+            self._selected_open_candidate = None
+            self.last_auto_var_order_status = (
+                "NO_ACTION: execution microstructure veto "
+                f"({adverse_count} adverse factors)"
+            )
+            return None
         headroom_bps = self.effective_open_execution_headroom_bps(
             candidate.direction.value,
             candidate.order_notional_usd,
+            current_rate=candidate.reference_rate,
+            now_ms=now_ms,
         )
         execution_threshold = (
             candidate.threshold + headroom_bps / Decimal("10000")
@@ -8949,12 +9329,14 @@ class VariationalToLighterRuntime:
         market_generation: int,
         market_index: int,
         force_reduce_only_recovery: bool = False,
+        force_open_hedge_recovery: bool = False,
     ) -> tuple[LighterHedgeDispatchSnapshot | None, str | None]:
         """Capture the only post-Commit pre-send snapshot with integer prices.
 
         Normal strategy legs retain fresh-depth, IOC-slippage and frozen Firm
-        economics.  Only emergency/recovery reduce-only records may bypass
-        those vetoes to restore a flat account.
+        economics.  A final open-hedge recovery may bypass only the stale Firm
+        economic limit; fresh depth and configured IOC slippage remain binding.
+        Emergency/recovery reduce-only records retain their mandatory sweep.
         """
         trace_id = record.trace_id
         async with self.lighter_order_book_lock:
@@ -9038,6 +9420,16 @@ class VariationalToLighterRuntime:
             and record.strategy_phase == "close"
             and record.strategy_tag == ADAPTIVE_MODEL_VERSION
             and not force_reduce_only_recovery
+        )
+        is_guarded_strategy_open = bool(
+            not record.lighter_reduce_only
+            and record.strategy_phase == "open"
+            and record.strategy_tag == ADAPTIVE_MODEL_VERSION
+        )
+        if force_open_hedge_recovery and not is_guarded_strategy_open:
+            return None, "Open-hedge recovery requires a current strategy open record"
+        is_open_hedge_recovery = bool(
+            force_open_hedge_recovery and is_guarded_strategy_open
         )
         is_mandatory_recovery = (
             record.lighter_reduce_only and not is_guarded_strategy_close
@@ -9163,7 +9555,7 @@ class VariationalToLighterRuntime:
             if economic_limit_price_i <= 0:
                 return None, "Firm Guard produced an invalid Lighter economic limit"
         price_i = configured_price_i
-        if economic_limit_price_i is not None:
+        if economic_limit_price_i is not None and not is_open_hedge_recovery:
             price_i = (
                 min(price_i, economic_limit_price_i)
                 if lighter_side == "BUY"
@@ -9185,6 +9577,7 @@ class VariationalToLighterRuntime:
                 economic_limit_price_i=economic_limit_price_i,
                 effective_slippage_bps=effective_slippage_bps,
                 reduce_only_recovery=is_mandatory_recovery,
+                open_hedge_recovery=is_open_hedge_recovery,
             )
             return None, LIGHTER_IOC_LIMIT_EXHAUSTED
 
@@ -9213,7 +9606,8 @@ class VariationalToLighterRuntime:
             effective_slippage_bps=effective_slippage_bps,
             reduce_only_recovery=is_mandatory_recovery,
             guarded_strategy_close=is_guarded_strategy_close,
-            local_price_guard_bypassed=False,
+            open_hedge_recovery=is_open_hedge_recovery,
+            local_price_guard_bypassed=is_open_hedge_recovery,
         )
         return snapshot, None
 
@@ -9403,7 +9797,7 @@ class VariationalToLighterRuntime:
         ]
 
     def provisional_phase_reserve_usd(self, notional_usd: Decimal) -> Decimal:
-        """Fixed v1 reserve for both legs of one open or close phase."""
+        """Configured reserve for both legs of one open or close phase."""
 
         return self.phase_reserve_usd(
             notional_usd,
@@ -9420,16 +9814,11 @@ class VariationalToLighterRuntime:
         current_rate: Decimal | None = None,
         now_ms: int | None = None,
     ) -> Decimal:
-        """Estimate whether the signal can survive the opening hedge window.
-
-        The one-hour policy has no fixed add-on.  It only reacts to the current
-        five-second rate range and adverse one-basis-point book imbalance.
-        Historical execution losses remain diagnostic and never enter here.
-        """
+        """Return the calibrated buffer needed to survive the execution chain."""
 
         del notional_usd, reserve_bps_per_leg, sample_notional_usd
         direction = side.strip().upper()
-        if direction not in OPEN_SURVIVAL_RANGE_WEIGHT:
+        if direction not in {"BUY", "SELL"}:
             return Decimal("0")
         strategy_side = StrategySide(direction)
         frame = self.last_market_frame
@@ -9442,24 +9831,74 @@ class VariationalToLighterRuntime:
             now_ms=(time.time_ns() // 1_000_000 if now_ms is None else now_ms),
             current_rate=current_rate,
         )
+        asset = (
+            frame.asset
+            if frame is not None
+            else str(self.variational_ticker or "")
+        )
+        calibration = self.execution_survival_model.calibration(asset, direction)
+        if rate_range is None or calibration is None:
+            return Decimal("0")
+        return calibration.required_buffer_bps(rate_range * Decimal("10000"))
+
+    def execution_survival_microstructure_allows(
+        self,
+        side: str,
+        *,
+        microstructure: dict[str, Any] | None = None,
+    ) -> tuple[bool, int, dict[str, Decimal]]:
+        """Apply the asset/side model's consensus veto to current Lighter flow."""
+
+        direction = side.strip().upper()
+        frame = self.last_market_frame
+        asset = (
+            frame.asset
+            if frame is not None
+            else str(self.variational_ticker or "")
+        )
+        calibration = self.execution_survival_model.calibration(asset, direction)
+        if calibration is None:
+            return False, 4, {}
         depth = lighter_depth_features(
             self.lighter_order_book,
             self.lighter_best_bid,
             self.lighter_best_ask,
         )
         one_bps = depth.get("bands_bps", {}).get("1")
-        if rate_range is None or not isinstance(one_bps, dict):
-            return Decimal("0")
-        imbalance = Decimal(one_bps.get("imbalance") or 0)
-        directional_imbalance = (
-            imbalance if direction == "BUY" else -imbalance
+        if not isinstance(one_bps, dict):
+            return True, 0, {}
+        depth_usd = Decimal(one_bps.get("bid_usd") or 0) + Decimal(
+            one_bps.get("ask_usd") or 0
         )
-        adverse_imbalance = max(Decimal("0"), -directional_imbalance)
-        range_bps = rate_range * Decimal("10000")
-        return (
-            OPEN_SURVIVAL_RANGE_WEIGHT[direction] * range_bps
-            + OPEN_SURVIVAL_IMBALANCE_WEIGHT[direction] * adverse_imbalance
-        )
+        if depth_usd <= 0:
+            return True, 0, {}
+        fields = microstructure or self.lighter_microstructure_features()
+        horizons = fields.get("horizons_ms", {})
+        one_second = horizons.get("1000", {})
+        one_tenth = horizons.get("100", {})
+        microprice = fields.get("microprice_bps")
+        if microprice is None:
+            return True, 0, {}
+        sign = Decimal("1") if direction == "BUY" else Decimal("-1")
+
+        def directional_log(value: object) -> Decimal:
+            ratio = sign * Decimal(value or 0) / depth_usd
+            magnitude = Decimal(str(math.log1p(float(abs(ratio)))))
+            return magnitude if ratio >= 0 else -magnitude
+
+        values = {
+            "directionalImbalance1Bps": sign
+            * Decimal(one_bps.get("imbalance") or 0),
+            "directionalBookFlow1000": directional_log(
+                one_second.get("book_flow_usd")
+            ),
+            "directionalTradeFlow100": directional_log(
+                one_tenth.get("trade_flow_usd")
+            ),
+            "directionalMicropriceBps": sign * Decimal(microprice),
+        }
+        adverse = calibration.adverse_feature_count(values)
+        return adverse < calibration.veto_count, adverse, values
 
     def firm_open_execution_reserve_bps(
         self,
@@ -9496,6 +9935,26 @@ class VariationalToLighterRuntime:
             )
             / Decimal("10000")
         )
+
+    def firm_close_execution_reserve_usd(
+        self,
+        *,
+        side: str,
+        notional_usd: Decimal,
+        current_rate: Decimal,
+        minimum_bps: Decimal,
+        now_ms: int,
+    ) -> tuple[Decimal, Decimal]:
+        """Protect the close floor with the same measured latency buffer."""
+
+        dynamic_bps = self.effective_open_execution_headroom_bps(
+            side,
+            notional_usd,
+            current_rate=current_rate,
+            now_ms=now_ms,
+        )
+        reserve_bps = max(minimum_bps, dynamic_bps)
+        return reserve_bps, notional_usd * reserve_bps / Decimal("10000")
 
     @staticmethod
     def phase_reserve_usd(
@@ -9813,18 +10272,34 @@ class VariationalToLighterRuntime:
                 }
             confirmed = confirmation.open_candidate
             assert confirmed is not None
-            opposite_component = epoch.component(confirmed.direction.opposite)
-            projected_exit_rate = (
-                opposite_component.exit_opportunity
-                if epoch.model_version in {
-                    "adaptive-median-v2",
-                    "adaptive-median-v3",
-                    "adaptive-median-v4",
-                    "adaptive-median-v5",
-                    "adaptive-median-v6",
-                }
-                else opposite_component.baseline
+            (
+                microstructure_allowed,
+                adverse_feature_count,
+                microstructure_values,
+            ) = self.execution_survival_microstructure_allows(
+                confirmed.direction.value
             )
+            self.trace_event(
+                "open_firm_microstructure_guard",
+                trace_id,
+                allowed=microstructure_allowed,
+                adverse_feature_count=adverse_feature_count,
+                values=microstructure_values,
+            )
+            if not microstructure_allowed:
+                return {
+                    "type": "ORDER_RESULT",
+                    "requestId": quote_result.get("requestId"),
+                    "ok": False,
+                    "error": (
+                        "fresh firm quote rejected: execution microstructure "
+                        f"has {adverse_feature_count} adverse factors"
+                    ),
+                    "detail": {**quote_result_detail, "quote": quote_detail},
+                    "trace_id": trace_id,
+                }
+            opposite_component = epoch.component(confirmed.direction.opposite)
+            projected_exit_rate = opposite_component.exit_opportunity
             close_credit = firm_notional * projected_exit_rate
             wear = firm_notional * epoch.max_normal_round_wear_bps / Decimal("10000")
             execution_headroom_bps = self.firm_open_execution_reserve_bps(
@@ -9856,22 +10331,8 @@ class VariationalToLighterRuntime:
                 firm_notional,
                 epoch.reserve_bps_per_leg,
             )
-            # V3/V4/V5/V6 previously subtracted this reserve here and added it back
-            # inside evaluate_firm_quote_guard(), cancelling the protection.
-            # The dynamic threshold is the true minimum; the direction-specific
-            # execution headroom is now added exactly once by the Firm Guard,
-            # matching the latest legacy execution-layer semantics.
-            minimum_pnl = (
-                confirmed.threshold * firm_notional
-                if epoch.model_version
-                in {
-                    "adaptive-median-v3",
-                    "adaptive-median-v4",
-                    "adaptive-median-v5",
-                    "adaptive-median-v6",
-                }
-                else -wear - close_credit + close_reserve
-            )
+            # The execution headroom is added once by the Firm Guard.
+            minimum_pnl = confirmed.threshold * firm_notional
             strategy_payload = open_candidate_to_payload(confirmed)
             strategy_payload.update(
                 {
@@ -9882,6 +10343,9 @@ class VariationalToLighterRuntime:
                         execution_headroom_bps
                     ),
                     "openSurvivalPolicyVersion": OPEN_SURVIVAL_POLICY_VERSION,
+                    "openHedgeRecoveryPolicyVersion": (
+                        OPEN_HEDGE_RECOVERY_POLICY_VERSION
+                    ),
                     "firmReferenceRate": decimal_to_str(firm_reference_rate),
                     "firmReferenceVwap": decimal_to_str(firm_reference_vwap),
                     "firmCloseReserveUsd": decimal_to_str(close_reserve),
@@ -9938,30 +10402,30 @@ class VariationalToLighterRuntime:
                     "detail": {**quote_result_detail, "quote": quote_detail},
                     "trace_id": trace_id,
                 }
-            # The wear floor remains tied to the actual opening amount, while
-            # this phase reserve scales with the exact current Firm notional.
-            execution_reserve = (
-                self.phase_reserve_usd(
-                    firm_notional,
-                    frozen_open.epoch.reserve_bps_per_leg,
-                )
-                * CLOSE_RESERVE_MULTIPLIER
+            firm_close_rate = (
+                (lighter_vwap - firm_price) / firm_price
+                if side.strip().upper() == "BUY"
+                else (firm_price - lighter_vwap) / firm_price
             )
-            firm_regression_required = (
-                frozen_open.epoch.model_version == "adaptive-median-v1"
+            (
+                close_execution_headroom_bps,
+                execution_reserve,
+            ) = self.firm_close_execution_reserve_usd(
+                side=side,
+                notional_usd=firm_notional,
+                current_rate=firm_close_rate,
+                minimum_bps=frozen_open.epoch.reserve_bps_per_leg,
+                now_ms=now_ms,
             )
+            firm_regression_required = False
             if close_candidate.zero_wear_stability_passed:
-                # Stability is an alternative only while the gross round is
-                # above zero.  Subtracting the reserve here cancels the guard's
-                # normal reserve addition, so the fresh Firm check still
-                # requires actual_open + firm_close >= 0, never a negative
-                # zero-wear result.
-                minimum_pnl = -open_pnl - execution_reserve
+                minimum_pnl = -open_pnl
             else:
                 minimum_pnl = close_candidate.required_floor_usd - open_pnl
             strategy_payload = {
                 "schema": "adaptive-close-context-v1",
                 "strategyTag": ADAPTIVE_MODEL_VERSION,
+                "closeFloorPolicyVersion": CLOSE_HOLD_FLOOR_POLICY_VERSION,
                 "epochId": close_candidate.frozen_epoch_id,
                 "heldSeconds": close_candidate.held_seconds,
                 "requiredFloorUsd": decimal_to_str(close_candidate.required_floor_usd),
@@ -9974,6 +10438,9 @@ class VariationalToLighterRuntime:
                 ),
                 "firmNotionalUsd": decimal_to_str(firm_notional),
                 "firmCloseReserveUsd": decimal_to_str(execution_reserve),
+                "firmCloseExecutionHeadroomBps": decimal_to_str(
+                    close_execution_headroom_bps
+                ),
                 "zeroWearStabilityPassed": (
                     close_candidate.zero_wear_stability_passed
                 ),
@@ -10012,6 +10479,11 @@ class VariationalToLighterRuntime:
             "targetNotionalUsd": decimal_to_str(firm_target_notional),
             "guardPnl": decimal_to_str(decision.expected_pnl),
             "guardMinPnl": decimal_to_str(decision.required_pnl),
+            "hedgeMinPnl": decimal_to_str(
+                minimum_pnl
+                if open_candidate is not None
+                else decision.required_pnl
+            ),
             "executionReserveUsd": decimal_to_str(execution_reserve),
             "lighterVwap": decimal_to_str(lighter_vwap),
             "lighterQuoteAgeMs": lighter_age_ms,
@@ -10522,8 +10994,8 @@ class VariationalToLighterRuntime:
             }
 
         reason = (
-            "Var commit was accepted but its position/fill could not be confirmed; "
-            "manual account reconciliation is required"
+            "Var commit was accepted but remained unconfirmed after a priority page "
+            "refresh; manual account reconciliation is required"
         )
         # This is an execution-ambiguity pause, not a manual/operator halt.
         # Give ownership to reconciliation so an authoritative portfolio
@@ -10889,9 +11361,7 @@ class VariationalToLighterRuntime:
                     close_candidate=close_candidate,
                 )
         if (
-            frozen_open.epoch.model_version
-            in {"adaptive-median-v5", "adaptive-median-v6"}
-            and decision.action is StrategyAction.CLOSE
+            decision.action is StrategyAction.CLOSE
             and close_candidate is not None
             and close_candidate.held_seconds < self.strategy_engine.early_exit_seconds
         ):
@@ -10900,13 +11370,13 @@ class VariationalToLighterRuntime:
                 now_ms=now_ms,
                 current_rate=frame.reference_rates.for_side(close_side),
             )
-            maximum_range = V5_CLOSE_RATE_RANGE_BPS / Decimal("10000")
+            maximum_range = CLOSE_RATE_RANGE_BPS / Decimal("10000")
             if close_rate_range is None or close_rate_range > maximum_range:
                 started_ms = self._close_range_deferral_started_ms.setdefault(
                     current_open.trade_key,
                     now_ms,
                 )
-                if now_ms - started_ms < V5_CLOSE_RANGE_MAX_DEFERRAL_MS:
+                if now_ms - started_ms < CLOSE_RANGE_MAX_DEFERRAL_MS:
                     decision = StrategyDecision(
                         StrategyAction.NO_ACTION,
                         "close_five_second_rate_range_deferral",
@@ -10956,6 +11426,11 @@ class VariationalToLighterRuntime:
             return
         if not await self.runtime.command_broker.extension_connected():
             self.last_auto_var_close_status = "command disconnected"
+            return
+        if not self.automation_can_submit_var_order(
+            "last_auto_var_close_status",
+            allow_reconcile_degraded=True,
+        ):
             return
 
         if current_open is None:
@@ -11065,6 +11540,8 @@ class VariationalToLighterRuntime:
             return
         if not await self.runtime.command_broker.extension_connected():
             self.last_auto_var_order_status = "command disconnected"
+            return
+        if not self.automation_can_submit_var_order("last_auto_var_order_status"):
             return
         self._auto_var_order_inflight = True
         self._last_auto_var_order_at = time.time()
@@ -12006,13 +12483,11 @@ class VariationalToLighterRuntime:
             return {
                 CANARY_SESSION_OBSERVING: "Preparing",
                 CANARY_SESSION_ARMED: "Running",
-                CANARY_SESSION_REVIEW_REQUIRED: "Preparing",
                 CANARY_SESSION_HALTED: "Safety Paused",
             }.get(state, "Unknown")
         return {
             CANARY_SESSION_OBSERVING: "准备中",
             CANARY_SESSION_ARMED: "运行中",
-            CANARY_SESSION_REVIEW_REQUIRED: "准备中",
             CANARY_SESSION_HALTED: "安全暂停",
         }.get(state, "未知")
 
@@ -12169,17 +12644,7 @@ class VariationalToLighterRuntime:
         if frame is not None and epoch is not None and open_pnl is not None:
             notional = frame.actual_notional_usd
             opposite_component = epoch.component(side.opposite)
-            projected_exit_rate = (
-                opposite_component.exit_opportunity
-                if epoch.model_version in {
-                    "adaptive-median-v2",
-                    "adaptive-median-v3",
-                    "adaptive-median-v4",
-                    "adaptive-median-v5",
-                    "adaptive-median-v6",
-                }
-                else opposite_component.baseline
-            )
+            projected_exit_rate = opposite_component.exit_opportunity
             phase_reserve = (
                 notional
                 * Decimal("2")
@@ -12239,17 +12704,6 @@ class VariationalToLighterRuntime:
                 if is_zh
                 else f"{target} live rate below execution headroom"
             )
-        elif epoch.model_version not in {
-            "adaptive-median-v3",
-            "adaptive-median-v4",
-            "adaptive-median-v5",
-            "adaptive-median-v6",
-        } and (
-            round_lower_bound is None
-            or wear_floor is None
-            or round_lower_bound < wear_floor
-        ):
-            reason = "预计整轮下界不足" if is_zh else "round lower bound too low"
         elif self.strategy_config.execution_mode == "live" and submission_block_reason:
             reason = (
                 f"全局条件未就绪：{self._dashboard_open_gate_text(submission_block_reason, True)}"
@@ -12298,6 +12752,9 @@ class VariationalToLighterRuntime:
             _current, completed_rounds = build_trade_rounds(ordered_records)
             self._merge_dashboard_rounds_locked(completed_rounds)
             dashboard_rounds = copy.deepcopy(self._dashboard_round_batch)
+            holding_ledger = copy.deepcopy(
+                list(self._dashboard_holding_ledger.values())
+            )
         normal_wear_usd = (
             self.strategy_config.order_notional_usd
             * self.strategy_config.max_normal_round_wear_bps
@@ -12326,6 +12783,8 @@ class VariationalToLighterRuntime:
         total_close = Decimal("0")
         positive_rounds = 0
         negative_rounds = 0
+        batch_holding_seconds = 0
+        batch_holding_count = 0
         for offset, row in enumerate(dashboard_rounds):
             open_pnl = to_decimal(row.get("openWear"))
             close_pnl = to_decimal(row.get("closeWear"))
@@ -12338,6 +12797,10 @@ class VariationalToLighterRuntime:
                 positive_rounds += 1
             elif round_pnl is not None:
                 negative_rounds += 1
+            held_seconds = row.get("heldSeconds")
+            if isinstance(held_seconds, int) and not isinstance(held_seconds, bool):
+                batch_holding_seconds += max(0, held_seconds)
+                batch_holding_count += 1
             round_rows.append(
                 {
                     "number": offset + 1,
@@ -12346,12 +12809,65 @@ class VariationalToLighterRuntime:
                     "openWear": decimal_to_str(open_pnl),
                     "closeWear": decimal_to_str(close_pnl),
                     "roundWear": decimal_to_str(round_pnl),
+                    "openedAtMs": row.get("openedAtMs"),
+                    "closedAtMs": row.get("closedAtMs"),
+                    "heldSeconds": held_seconds,
                     "recovery": row["recovery"],
                     "withinLimit": bool(
                         round_pnl is not None and round_pnl >= -normal_wear_usd
                     ),
                 }
             )
+        holding_day, holding_day_start_ms, holding_day_end_ms = beijing_day_bounds_ms()
+        today_holding_ms = sum(
+            interval_overlap_ms(
+                int(row["openedAtMs"]),
+                int(row["closedAtMs"]),
+                holding_day_start_ms,
+                holding_day_end_ms,
+            )
+            for row in holding_ledger
+        )
+        if current_open is not None:
+            active_opened_at = parse_iso_datetime(current_open.var_fill_ts_iso)
+            if active_opened_at is not None:
+                today_holding_ms += interval_overlap_ms(
+                    int(active_opened_at.timestamp() * 1_000),
+                    int(time.time() * 1_000),
+                    holding_day_start_ms,
+                    holding_day_end_ms,
+                )
+        today_volume = Decimal("0")
+        today_wear = Decimal("0")
+        today_completed_rounds = 0
+        for row in holding_ledger:
+            opened_at_ms = int(row["openedAtMs"])
+            closed_at_ms = int(row["closedAtMs"])
+            if holding_day_start_ms <= opened_at_ms < holding_day_end_ms:
+                today_volume += to_decimal(row.get("openVolumeUsd")) or Decimal("0")
+            if holding_day_start_ms <= closed_at_ms < holding_day_end_ms:
+                today_volume += to_decimal(row.get("closeVolumeUsd")) or Decimal("0")
+                realized_wear = to_decimal(row.get("roundWear"))
+                if realized_wear is not None:
+                    today_wear += realized_wear
+                    today_completed_rounds += 1
+        if current_open is not None:
+            active_opened_at = parse_iso_datetime(current_open.var_fill_ts_iso)
+            if (
+                active_opened_at is not None
+                and holding_day_start_ms
+                <= int(active_opened_at.timestamp() * 1_000)
+                < holding_day_end_ms
+                and current_open.var_fill_price is not None
+            ):
+                today_volume += abs(
+                    current_open.var_fill_price * current_open.qty
+                )
+        today_average_wear = (
+            today_wear / Decimal(today_completed_rounds)
+            if today_completed_rounds
+            else None
+        )
         total_round = sum(
             (
                 to_decimal(row.get("roundWear")) or Decimal("0")
@@ -12421,13 +12937,20 @@ class VariationalToLighterRuntime:
         positions_match = self.last_reconcile_outcome is AccountReconcileOutcome.FRESH_MATCH
         direction = None
         held_seconds = None
+        idle_seconds = None
         if current_open is not None:
             long_var = current_open.side.strip().lower() == "buy"
             direction = "多 Var / 空 Lighter" if long_var else "空 Var / 多 Lighter"
             held_seconds = record_hold_seconds(current_open)
+        elif self._last_round_closed_at > 0:
+            idle_seconds = max(0, int(time.time() - self._last_round_closed_at))
         ages = [age for age in (var_age, lighter_age) if age is not None]
         data_age = max(ages) if len(ages) == 2 else None
-        if self.automation_paused:
+        if not self._runtime_state_loaded:
+            headline = "Runtime 正在恢复持久化状态"
+            level = "warning"
+            risk = "新开仓被阻止"
+        elif self.automation_paused:
             headline = f"安全暂停：{self._dashboard_pause_text(self.automation_pause_reason, True)}"
             level = "error"
             risk = "需要人工检查"
@@ -12439,6 +12962,14 @@ class VariationalToLighterRuntime:
             headline = "权威账户仓位不一致"
             level = "error"
             risk = "单边暴露风险"
+        elif self.last_reconcile_outcome is AccountReconcileOutcome.STALE:
+            headline = "Var 账户快照已过期，等待自动刷新对账"
+            level = "warning"
+            risk = "新开仓已阻止，既有持仓继续受控"
+        elif self.last_reconcile_outcome is AccountReconcileOutcome.UNKNOWN:
+            headline = "账户快照暂不可用"
+            level = "warning"
+            risk = "新开仓已阻止"
         elif not command_connected:
             headline = "Var 命令通道未连接"
             level = "warning"
@@ -12448,9 +12979,25 @@ class VariationalToLighterRuntime:
             level = "normal"
             risk = "策略运行稳定"
         strategy_status = (
-            "安全暂停"
-            if self.automation_paused
-            else ("新开仓暂停" if self.operator_open_paused else "运行中")
+            "恢复状态中"
+            if not self._runtime_state_loaded
+            else (
+                "安全暂停"
+                if self.automation_paused
+                else (
+                    "新开仓暂停"
+                    if self.operator_open_paused
+                    else (
+                        "等待账户对账"
+                        if self.last_reconcile_outcome
+                        in {
+                            AccountReconcileOutcome.STALE,
+                            AccountReconcileOutcome.UNKNOWN,
+                        }
+                        else "运行中"
+                    )
+                )
+            )
         )
         return {
             "schema": "var-lit-v1-operations-state-v1",
@@ -12485,11 +13032,14 @@ class VariationalToLighterRuntime:
                 ),
                 "direction": direction,
                 "heldSeconds": held_seconds,
+                "idleSeconds": idle_seconds,
             },
             "strategy": {
                 "mode": self.strategy_config.execution_mode,
                 "status": strategy_status,
-                "openPaused": self.operator_open_paused,
+                "openPaused": (
+                    self.operator_open_paused or not self._runtime_state_loaded
+                ),
                 "automationPaused": self.automation_paused,
                 "pauseReason": self.automation_pause_reason,
                 "automationReady": self.automation_ready,
@@ -12522,6 +13072,19 @@ class VariationalToLighterRuntime:
                 "totalCloseWear": decimal_to_str(total_close),
                 "totalWear": decimal_to_str(total_round),
                 "averageWear": decimal_to_str(average_round),
+                "batchHoldingSeconds": batch_holding_seconds,
+                "averageHoldingSeconds": (
+                    batch_holding_seconds // batch_holding_count
+                    if batch_holding_count
+                    else None
+                ),
+                "todayHoldingSeconds": today_holding_ms // 1_000,
+                "todayTradingVolumeUsd": decimal_to_str(today_volume),
+                "todayWear": decimal_to_str(today_wear),
+                "todayAverageWear": decimal_to_str(today_average_wear),
+                "todayCompletedRounds": today_completed_rounds,
+                "holdingDay": holding_day,
+                "holdingTimezone": "Asia/Shanghai",
                 "positiveRounds": positive_rounds,
                 "negativeRounds": negative_rounds,
                 "currentBasis": {
@@ -12568,6 +13131,11 @@ class VariationalToLighterRuntime:
                         if current_open is not None and close_candidate is not None
                         else None
                     ),
+                    "requiredFloor": decimal_to_str(
+                        close_candidate.required_floor_usd
+                        if current_open is not None and close_candidate is not None
+                        else None
+                    ),
                 },
             },
             "recentRounds": round_rows,
@@ -12577,7 +13145,6 @@ class VariationalToLighterRuntime:
         current_open = await self._current_open_record()
         account = self.last_account_snapshot
         payload = {
-            "account_captured_at": account.captured_at if account else None,
             "var_position": decimal_to_str(account.var_position) if account else None,
             "lighter_position": (
                 decimal_to_str(account.lighter_position) if account else None
@@ -12699,6 +13266,11 @@ class VariationalToLighterRuntime:
         }
         if action not in supported:
             return {"allowed": False, "reason": "未知操作"}
+        if not self._runtime_state_loaded and action != "refresh_var":
+            return {
+                "allowed": False,
+                "reason": "Runtime 正在恢复持久化状态，请稍后再操作",
+            }
         guard = await self._operator_state_guard()
         account = self.last_account_snapshot
         current_open = await self._current_open_record()
@@ -12714,7 +13286,10 @@ class VariationalToLighterRuntime:
             ),
             "执行中转换": "是" if self.transition_in_progress() else "否",
         }
-        if self._operator_action_inflight:
+        if (
+            self._operator_action_inflight
+            and self._operator_action_owner is not asyncio.current_task()
+        ):
             return {"allowed": False, "reason": "另一个操作正在执行", "facts": facts}
         if action == "pause_open":
             return {
@@ -12751,7 +13326,7 @@ class VariationalToLighterRuntime:
             return {
                 "allowed": True,
                 "guard": guard,
-                "message": "确认写入 .env；当前进程不热更新，重启 Runtime 后生效。",
+                "message": "确认写入运行配置；当前进程不热更新，重启 Runtime 后生效。",
                 "facts": config_facts,
                 "updates": updates,
             }
@@ -12807,18 +13382,28 @@ class VariationalToLighterRuntime:
                 "facts": facts,
             }
         if action == "refresh_var":
-            if self.pending_var_intent is not None or self._auto_var_order_inflight:
-                return {"allowed": False, "reason": "Var 订单仍处于提交或确认阶段", "facts": facts}
             return {
                 "allowed": True,
                 "guard": guard,
-                "message": "刷新前会持久化暂停新开仓，随后等待 Var 行情重新变为新鲜。",
+                "message": (
+                    "立即进入最高优先级刷新；当前请求完成后重载 Var，持仓记录保持不变并重新精确对账。"
+                    if current_open is not None
+                    else "立即进入最高优先级刷新；当前请求完成后重载 Var 并重新读取双方权威仓位。"
+                ),
                 "facts": facts,
             }
+        resolvable_ambiguous_commit = bool(
+            self.pending_var_intent is not None
+            and self.pending_var_intent.state == VAR_INTENT_COMMIT_AMBIGUOUS
+            and not self._auto_var_order_inflight
+            and not any(not task.done() for task in self.hedge_tasks)
+        )
+        if self.transition_in_progress() and not resolvable_ambiguous_commit:
+            return {"allowed": False, "reason": "仍有订单或对冲正在执行", "facts": facts}
         return {
             "allowed": True,
             "guard": guard,
-            "message": "重新读取双方权威仓位；只有精确一致时才恢复对账类安全暂停。",
+            "message": "重新读取双方权威仓位；空仓且 Var 快照过期时会先安全刷新，再恢复对账类安全暂停。",
             "facts": facts,
         }
 
@@ -12887,7 +13472,6 @@ class VariationalToLighterRuntime:
         websocket_url = str(target["webSocketDebuggerUrl"])
         async with websockets.connect(
             websocket_url,
-            origin=debug_origin,
             open_timeout=3,
             close_timeout=1,
             max_size=1024 * 1024,
@@ -12935,24 +13519,125 @@ class VariationalToLighterRuntime:
             await asyncio.sleep(0.2)
         raise RuntimeError("Var 页面刷新后，三条扩展通道没有在 60 秒内恢复")
 
+    def variational_command_request_inflight(self) -> bool:
+        intent = self.pending_var_intent
+        return bool(
+            self._auto_var_order_inflight
+            or (
+                intent is not None
+                and intent.state == VAR_INTENT_COMMITTING
+                and intent.commit_accepted_monotonic is None
+            )
+        )
+
     async def refresh_variational_page_when_safe(self) -> None:
-        while not self.stop_flag:
-            if self.transition_in_progress() or await self._current_open_record() is not None:
-                await asyncio.sleep(0.25)
-                continue
+        """Run a queued, highest-priority reload without aborting an HTTP Commit."""
+
+        async with self._variational_refresh_lock:
             self._variational_refresh_in_progress = True
             try:
-                # Close the race with an open/hedge that started immediately
-                # before the refresh guard became visible to the signal loop.
-                if (
-                    self.transition_in_progress()
-                    or await self._current_open_record() is not None
-                ):
-                    continue
+                # The refresh request blocks every new strategy action at once.
+                # Only an already-sent HTTP request is allowed to return first;
+                # reloading before that boundary would manufacture ambiguity.
+                while not self.stop_flag and self.variational_command_request_inflight():
+                    await asyncio.sleep(0.05)
+                if self.stop_flag:
+                    return
                 await self._refresh_variational_page_via_cdp()
-                return
             finally:
                 self._variational_refresh_in_progress = False
+
+    async def refresh_variational_account_and_reconcile(self) -> bool:
+        """Refresh Var without discarding a tracked position, then reconcile."""
+
+        latest_fill_time = await self.latest_confirmed_variational_fill_time()
+        await self.refresh_variational_page_when_safe()
+        if not await self.wait_for_authoritative_portfolio_after(latest_fill_time):
+            return False
+        intent = self.pending_var_intent
+        if intent is not None:
+            recovery = await self.inspect_pending_var_intent_from_portfolio()
+            if recovery is VarPortfolioRecoveryOutcome.CONFIRMED_NOT_FILLED:
+                await self.rollback_unconfirmed_var_commit(expected_intent=intent)
+                return False
+            if (
+                recovery is VarPortfolioRecoveryOutcome.UNKNOWN
+                and self.pending_var_intent is intent
+            ):
+                return False
+        return await self.reconcile_accounts(
+            allow_resume=True,
+            after_page_refresh=True,
+        )
+
+    async def refresh_stale_variational_portfolio_if_safe(self) -> bool:
+        """Refresh once before accepting any degraded account conclusion."""
+
+        if (
+            self.stop_flag
+            or self.last_reconcile_outcome
+            not in {
+                AccountReconcileOutcome.STALE,
+                AccountReconcileOutcome.UNKNOWN,
+                AccountReconcileOutcome.FRESH_MISMATCH,
+            }
+            or self._operator_action_inflight
+            or self._variational_refresh_in_progress
+            or self.transition_in_progress()
+        ):
+            return False
+        latest_fill_time = await self.latest_confirmed_variational_fill_time()
+        if (
+            self.last_reconcile_outcome is AccountReconcileOutcome.STALE
+            and latest_fill_time is None
+        ):
+            return False
+        now = datetime.now(timezone.utc)
+        stale_in_grace = bool(
+            latest_fill_time is not None
+            and self.last_reconcile_outcome is AccountReconcileOutcome.STALE
+            and (now - latest_fill_time).total_seconds()
+            < VARIATIONAL_PORTFOLIO_REFRESH_GRACE_SECONDS
+        )
+        refresh_in_cooldown = bool(
+            time.monotonic() - self._last_stale_portfolio_refresh_at
+            < VARIATIONAL_PAGE_REFRESH_RETRY_SECONDS
+        )
+        if stale_in_grace or refresh_in_cooldown:
+            return False
+        self._last_stale_portfolio_refresh_at = time.monotonic()
+        try:
+            matched = await self.refresh_variational_account_and_reconcile()
+        except Exception as exc:
+            self.logger.warning(
+                "Automatic post-fill Variational portfolio refresh failed: %s",
+                exc,
+            )
+            return False
+        if matched:
+            self.logger.info(
+                "Automatic post-fill Variational portfolio refresh restored exact reconciliation"
+            )
+        return matched
+
+    async def wait_for_authoritative_portfolio_after(
+        self,
+        latest_fill_time: datetime | None,
+        *,
+        timeout_seconds: float = READY_TIMEOUT_SECONDS,
+    ) -> bool:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            metadata = await self.get_variational_portfolio_metadata(
+                self.variational_ticker or ""
+            )
+            if self.variational_portfolio_degraded_outcome(
+                metadata,
+                latest_fill_time,
+            ) is None:
+                return True
+            await asyncio.sleep(0.2)
+        return False
 
     async def variational_page_refresh_loop(self) -> None:
         delay = VARIATIONAL_PAGE_REFRESH_SECONDS
@@ -12979,10 +13664,17 @@ class VariationalToLighterRuntime:
     ) -> dict[str, Any]:
         expected_guard = str(preview.get("guard") or "")
         async with self._operator_action_lock:
-            if expected_guard != await self._operator_state_guard():
-                return {"ok": False, "error": "账户或执行状态已变化，请重新确认"}
             self._operator_action_inflight = True
+            self._operator_action_owner = asyncio.current_task()
             try:
+                current_preview = await self.prepare_operations_action(action, payload)
+                if current_preview.get("allowed") is not True:
+                    return {
+                        "ok": False,
+                        "error": str(current_preview.get("reason") or "操作条件已变化"),
+                    }
+                if expected_guard != current_preview.get("guard"):
+                    return {"ok": False, "error": "账户或执行状态已变化，请重新确认"}
                 if action == "pause_open":
                     self.operator_open_paused = not self.operator_open_paused
                     await self.persist_runtime_state()
@@ -13003,15 +13695,29 @@ class VariationalToLighterRuntime:
                         DOTENV_FILE,
                         {str(key): str(value) for key, value in updates.items()},
                     )
-                    return {"ok": True, "message": "参数已安全写入 .env，重启 Runtime 后生效。"}
+                    return {
+                        "ok": True,
+                        "message": "参数已安全写入运行配置，重启 Runtime 后生效。",
+                    }
                 if action == "reconcile":
-                    matched = await self.reconcile_accounts(allow_resume=True)
+                    matched = await self.refresh_variational_account_and_reconcile()
                     return {
                         "ok": matched,
                         "message": (
-                            "双方账户已精确对账。"
+                            "双方账户已精确对账；新开仓暂停状态保持不变。"
                             if matched
                             else f"对账未通过：{self.last_reconcile_status}"
+                        ),
+                        "error": None if matched else self.last_reconcile_status,
+                    }
+                if action == "refresh_var":
+                    matched = await self.refresh_variational_account_and_reconcile()
+                    return {
+                        "ok": matched,
+                        "message": (
+                            "Var 页面已刷新，双方账户已精确对账；原有新开仓状态保持不变。"
+                            if matched
+                            else "Var 页面已刷新，但账户精确对账尚未恢复。"
                         ),
                         "error": None if matched else self.last_reconcile_status,
                     }
@@ -13082,11 +13788,9 @@ class VariationalToLighterRuntime:
                     if not self.schedule_lighter_order(record):
                         return {"ok": False, "error": "Lighter 残仓平仓任务未能调度"}
                     return {"ok": True, "message": "Lighter reduce-only 残仓平仓已提交，等待成交确认。"}
-                if action == "refresh_var":
-                    await self._refresh_variational_page_via_cdp()
-                    return {"ok": True, "message": "Var 页面已刷新，实时行情已恢复；新开仓仍保持暂停。"}
                 return {"ok": False, "error": "未知操作"}
             finally:
+                self._operator_action_owner = None
                 self._operator_action_inflight = False
 
     async def render_dashboard(self) -> Group:
@@ -13280,28 +13984,7 @@ class VariationalToLighterRuntime:
             )
 
         adaptive = Table(title="动态方向门槛" if is_zh else "Dynamic Direction Thresholds", expand=True)
-        entry_threshold_label = (
-            "三窗门槛"
-            if is_zh
-            and ADAPTIVE_MODEL_VERSION
-            in {
-                "adaptive-median-v3",
-                "adaptive-median-v4",
-                "adaptive-median-v5",
-                "adaptive-median-v6",
-            }
-            else (
-                "3-Window Gate"
-                if ADAPTIVE_MODEL_VERSION
-                in {
-                    "adaptive-median-v3",
-                    "adaptive-median-v4",
-                    "adaptive-median-v5",
-                    "adaptive-median-v6",
-                }
-                else "Q80"
-            )
-        )
+        entry_threshold_label = "三窗门槛" if is_zh else "3-Window Gate"
         adaptive_columns = (
             ("方向", "Direction"),
             ("基准", "Baseline"),
@@ -13504,8 +14187,8 @@ class VariationalToLighterRuntime:
                 "not_loaded": "未尝试续接",
                 "sample_file_missing": "无历史样本",
                 "no_matching_valid_samples": "无匹配历史",
-                "history_stale_over_5m": "历史超过5m，重新采样",
-                "rejected_gap_over_5m": "停机超过5m，重新采样",
+                "history_stale_over_2m": "历史超过2m，重新采样",
+                "rejected_gap_over_2m": "停机超过2m，重新采样",
                 "history_coverage_under_1h": "历史不足1h",
                 "history_density_too_low": "历史密度不足",
                 "sampling_disabled": "续接关闭",
@@ -13518,8 +14201,8 @@ class VariationalToLighterRuntime:
                 "not_loaded": "resume not attempted",
                 "sample_file_missing": "no history",
                 "no_matching_valid_samples": "no matching history",
-                "history_stale_over_5m": "history stale; fresh sampling",
-                "rejected_gap_over_5m": "restart gap over 5m; fresh sampling",
+                "history_stale_over_2m": "history stale; fresh sampling",
+                "rejected_gap_over_2m": "restart gap over 2m; fresh sampling",
                 "history_coverage_under_1h": "history under 1h",
                 "history_density_too_low": "history density too low",
                 "sampling_disabled": "resume disabled",
@@ -13550,13 +14233,15 @@ class VariationalToLighterRuntime:
             "开平规则" if is_zh else "Open/Close Rule",
             (
                 f"0-{self._fmt_policy_duration(self.strategy_config.early_exit_seconds)}：整轮下界 ≥ 0U"
-                f" | 之后 ≥ {self._fmt_money(-normal_wear_usd)}"
+                f" | 30m后下限{self._fmt_money(-normal_wear_usd)}"
+                f" | 1h起每10m放宽{LONG_HOLD_FLOOR_STEP_BPS}bps"
                 f" | 零磨损线上近10s累计2s可平"
                 f" | {self._fmt_policy_duration(self.strategy_config.max_hold_seconds)}提醒"
                 if is_zh
                 else
                 f"0-{self._fmt_policy_duration(self.strategy_config.early_exit_seconds)}: round floor ≥ 0U"
-                f" | then ≥ {self._fmt_money(-normal_wear_usd)}"
+                f" | after 30m floor {self._fmt_money(-normal_wear_usd)}"
+                f" | from 1h loosen {LONG_HOLD_FLOOR_STEP_BPS}bps every 10m"
                 f" | 2s positive gross within 10s may close"
                 f" | alert at {self._fmt_policy_duration(self.strategy_config.max_hold_seconds)}"
             ),
@@ -13676,7 +14361,7 @@ class VariationalToLighterRuntime:
             ("Var 开仓价", "Var Open Price", "var_open"),
             ("Lighter 开仓价", "Lighter Open Price", "lighter_open"),
             ("开仓收益", "Open PnL", "open_pnl"),
-            ("此时平仓磨损", "Close Wear Now", "close_wear"),
+            ("当前整轮净估值", "Current Round Net Value", "close_wear"),
             ("平仓预留", "Close Reserve", "close_reserve"),
             ("当前整轮净估", "Round Lower Bound", "round_now"),
         ):
@@ -13927,7 +14612,7 @@ class VariationalToLighterRuntime:
         if self.trace_writer is not None:
             self.trace_writer.start()
         if self.strategy_market_sample_writer is not None:
-            # The legacy sample file was append-only.  Trim it before the
+            # The rolling sample file is append-only. Trim it before the
             # writer starts so no append/replace race is possible.
             await asyncio.to_thread(
                 AsyncJsonlWriter.compact_jsonl_window,
@@ -13946,6 +14631,7 @@ class VariationalToLighterRuntime:
             )
         self.setup_signal_handlers()
         self.var_event_accept_after = datetime.now(timezone.utc)
+        self._runtime_state_loaded = False
         await self.runtime.start()
         if self.operations_dashboard_enabled:
             self.operations_dashboard_server = OperationsDashboardServer(

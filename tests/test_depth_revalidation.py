@@ -4,7 +4,7 @@ import time
 import unittest
 from argparse import Namespace
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import main as main_module
 from main import (
@@ -121,6 +121,231 @@ class DepthRevalidationTests(unittest.TestCase):
             assert snapshot is not None
             self.assertEqual(snapshot.economic_limit_price_i, 10_101)
             self.assertEqual(snapshot.price_i, 10_101)
+
+        asyncio.run(run_case())
+
+    def test_open_recovery_bypasses_only_frozen_economic_limit(self):
+        async def run_case():
+            runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
+            runtime.price_multiplier = 100
+            runtime.base_amount_multiplier = 1_000
+            runtime.update_lighter_order_book("asks", [["102", "1"]])
+            runtime.lighter_order_book_ready = True
+            runtime.lighter_order_book_nonce = 1238
+            runtime.lighter_book_received_monotonic = time.monotonic()
+            open_record = OrderLifecycle(
+                trade_key="open-recovery-limit",
+                trade_id="open-recovery-limit",
+                side="sell",
+                qty=Decimal("1"),
+                asset="BTC",
+                auto_hedge_enabled=True,
+                last_variational_status="filled",
+                firm_price=Decimal("100"),
+                firm_required_pnl=Decimal("-1"),
+                strategy_phase="open",
+                strategy_tag=main_module.ADAPTIVE_MODEL_VERSION,
+            )
+
+            protected, error = await runtime.capture_lighter_hedge_dispatch_snapshot(
+                record=open_record,
+                lighter_side="BUY",
+                base_amount=1_000,
+                market_generation=runtime.market_generation,
+                market_index=runtime.lighter_market_index,
+            )
+            recovered, recovery_error = await runtime.capture_lighter_hedge_dispatch_snapshot(
+                record=open_record,
+                lighter_side="BUY",
+                base_amount=1_000,
+                market_generation=runtime.market_generation,
+                market_index=runtime.lighter_market_index,
+                force_open_hedge_recovery=True,
+            )
+
+            self.assertIsNone(protected)
+            self.assertEqual(error, main_module.LIGHTER_IOC_LIMIT_EXHAUSTED)
+            self.assertIsNone(recovery_error)
+            self.assertIsNotNone(recovered)
+            assert recovered is not None
+            self.assertEqual(recovered.economic_limit_price_i, 10_100)
+            self.assertEqual(
+                recovered.price_i,
+                main_module.lighter_ioc_limit_price_tick(
+                    best_price_i=10_200,
+                    lighter_side="BUY",
+                    slippage_bps=runtime.strategy_config.hedge_slippage_bps,
+                ),
+            )
+
+            runtime.update_lighter_order_book("asks", [["102", "0.5"], ["103", "0.5"]])
+            bounded, bounded_error = await runtime.capture_lighter_hedge_dispatch_snapshot(
+                record=open_record,
+                lighter_side="BUY",
+                base_amount=1_000,
+                market_generation=runtime.market_generation,
+                market_index=runtime.lighter_market_index,
+                force_open_hedge_recovery=True,
+            )
+            self.assertIsNone(bounded)
+            self.assertEqual(bounded_error, main_module.LIGHTER_IOC_LIMIT_EXHAUSTED)
+
+        asyncio.run(run_case())
+
+    def test_normal_strategy_open_recovers_after_protected_retries(self):
+        async def run_case():
+            runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
+            runtime.base_amount_multiplier = 1_000
+            normal_open = OrderLifecycle(
+                trade_key="retry-normal-open",
+                trade_id="retry-normal-open",
+                side="sell",
+                qty=Decimal("1"),
+                asset="BTC",
+                auto_hedge_enabled=True,
+                last_variational_status="filled",
+                firm_price=Decimal("100"),
+                firm_required_pnl=Decimal("-1"),
+                strategy_phase="open",
+                strategy_tag=main_module.ADAPTIVE_MODEL_VERSION,
+            )
+            protected_attempts = 0
+            recovery_attempts = 0
+            submitted_prices = []
+
+            async def snapshot(**kwargs):
+                nonlocal protected_attempts, recovery_attempts
+                if kwargs.get("force_open_hedge_recovery"):
+                    recovery_attempts += 1
+                    return (
+                        main_module.LighterHedgeDispatchSnapshot(
+                            market_generation=runtime.market_generation,
+                            market_index=runtime.lighter_market_index,
+                            base_amount=1_000,
+                            price_i=10_200,
+                            marginal_price_i=10_100,
+                            economic_limit_price_i=10_000,
+                            order_book_nonce=3,
+                            quote_age_ms=0,
+                        ),
+                        None,
+                    )
+                protected_attempts += 1
+                return None, main_module.LIGHTER_IOC_LIMIT_EXHAUSTED
+
+            async def submit(**kwargs):
+                submitted_prices.append(kwargs["price"])
+                return type("Receipt", (), {"code": 0, "tx_hash": "open-recovery"})(), None
+
+            runtime.capture_lighter_hedge_dispatch_snapshot = snapshot
+            runtime.persist_runtime_state = AsyncMock()
+            runtime.submit_lighter_create_order = submit
+
+            await runtime._run_lighter_order_task(normal_open)
+
+            self.assertEqual(
+                protected_attempts,
+                runtime.strategy_config.lighter_hedge_max_attempts,
+            )
+            self.assertEqual(recovery_attempts, 1)
+            self.assertEqual(submitted_prices, [10_200])
+            self.assertEqual(len(normal_open.lighter_client_order_ids), 3)
+            self.assertEqual(
+                set(normal_open.lighter_client_order_ids[:2]),
+                runtime.lighter_order_terminal_ids,
+            )
+            self.assertEqual(normal_open.hedge_status, "submitted")
+            self.assertFalse(runtime.automation_paused)
+
+        asyncio.run(run_case())
+
+    def test_terminal_open_ioc_queues_one_final_recovery_attempt(self):
+        async def run_case():
+            runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
+            runtime.base_amount_multiplier = 1_000
+            normal_open = OrderLifecycle(
+                trade_key="terminal-open-recovery",
+                trade_id="terminal-open-recovery",
+                side="sell",
+                qty=Decimal("1"),
+                asset="BTC",
+                auto_hedge_enabled=True,
+                last_variational_status="filled",
+                strategy_phase="open",
+                strategy_tag=main_module.ADAPTIVE_MODEL_VERSION,
+                lighter_client_order_id=3,
+                lighter_client_order_ids=[1, 2, 3],
+            )
+            runtime.records[normal_open.trade_key] = normal_open
+            runtime.record_order.append(normal_open.trade_key)
+            runtime.lighter_client_order_to_trade_key[3] = normal_open.trade_key
+            runtime.lighter_order_terminal_ids.update({1, 2})
+            runtime.lighter_order_fill_totals.update(
+                {1: (Decimal("0"), Decimal("0")), 2: (Decimal("0"), Decimal("0"))}
+            )
+            runtime.persist_runtime_state = AsyncMock()
+            runtime.emergency_flatten_var = AsyncMock()
+
+            with patch.object(runtime, "queue_lighter_retry_after_current") as queue:
+                await runtime._apply_lighter_fill_update(
+                    {
+                        "client_order_id": 3,
+                        "status": "canceled-too-much-slippage",
+                        "filled_base_amount": "0",
+                        "filled_quote_amount": "0",
+                    }
+                )
+
+            queue.assert_called_once_with(normal_open)
+            runtime.emergency_flatten_var.assert_not_awaited()
+            self.assertEqual(normal_open.hedge_status, "retrying")
+            self.assertFalse(runtime.automation_paused)
+
+        asyncio.run(run_case())
+
+    def test_failed_final_open_recovery_still_flattens_var(self):
+        async def run_case():
+            runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
+            runtime.base_amount_multiplier = 1_000
+            normal_open = OrderLifecycle(
+                trade_key="final-open-recovery-failed",
+                trade_id="final-open-recovery-failed",
+                side="sell",
+                qty=Decimal("1"),
+                asset="BTC",
+                auto_hedge_enabled=True,
+                last_variational_status="filled",
+                strategy_phase="open",
+                strategy_tag=main_module.ADAPTIVE_MODEL_VERSION,
+                lighter_client_order_id=4,
+                lighter_client_order_ids=[1, 2, 3, 4],
+            )
+            runtime.records[normal_open.trade_key] = normal_open
+            runtime.record_order.append(normal_open.trade_key)
+            runtime.lighter_client_order_to_trade_key[4] = normal_open.trade_key
+            runtime.lighter_order_terminal_ids.update({1, 2, 3})
+            runtime.lighter_order_fill_totals.update(
+                {
+                    order_id: (Decimal("0"), Decimal("0"))
+                    for order_id in (1, 2, 3)
+                }
+            )
+            runtime.persist_runtime_state = AsyncMock()
+            runtime.emergency_flatten_var = AsyncMock()
+
+            with patch.object(runtime, "queue_lighter_retry_after_current") as queue:
+                await runtime._apply_lighter_fill_update(
+                    {
+                        "client_order_id": 4,
+                        "status": "canceled-too-much-slippage",
+                        "filled_base_amount": "0",
+                        "filled_quote_amount": "0",
+                    }
+                )
+
+            queue.assert_not_called()
+            runtime.emergency_flatten_var.assert_awaited_once_with(normal_open)
+            self.assertTrue(runtime.automation_paused)
 
         asyncio.run(run_case())
 

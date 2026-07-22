@@ -139,6 +139,31 @@ class DeploymentAssetTests(unittest.TestCase):
 
         self.assertIn("--no-dashboard", source)
         self.assertNotIn("--no-hedge", source)
+        self.assertIn("VARIATIONAL_ENV_FILE", source)
+
+        service = (
+            PROJECT_DIR
+            / "deploy"
+            / "systemd"
+            / "var-lit-v1-runtime.service.example"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "VARIATIONAL_ENV_FILE=/var/lib/var-lit-v1/runtime.env",
+            service,
+        )
+        self.assertNotIn("ExecStartPre=/usr/bin/test -f /opt/var-lit-v1/.env", service)
+
+        research = (
+            PROJECT_DIR
+            / "deploy"
+            / "systemd"
+            / "var-lit-v1-research.service.example"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "VARIATIONAL_ENV_FILE=/var/lib/var-lit-v1/runtime.env",
+            research,
+        )
+        self.assertNotIn("ExecStartPre=/usr/bin/test -f /opt/var-lit-v1/.env", research)
 
     def test_research_collector_is_isolated_and_low_priority(self) -> None:
         source = (
@@ -202,6 +227,38 @@ class DeploymentAssetTests(unittest.TestCase):
         self.assertIn("actions/setup-node@v7", workflow)
         self.assertIn("python -m unittest discover", workflow)
         self.assertIn("node --test tests/test_extension_templates.js", workflow)
+
+    def test_public_deployment_docs_cover_server_and_windows_client(self) -> None:
+        deployment = (PROJECT_DIR / "deploy" / "README.md").read_text(
+            encoding="utf-8"
+        )
+        windows = (PROJECT_DIR / "docs" / "WINDOWS_DASHBOARD.md").read_text(
+            encoding="utf-8"
+        )
+        architecture = (
+            PROJECT_DIR / "docs" / "ARCHITECTURE_AND_MODELS.md"
+        ).read_text(encoding="utf-8")
+        client = (
+            PROJECT_DIR / "clients" / "windows" / "Open-VarLitDashboard.ps1"
+        ).read_text(encoding="utf-8")
+
+        for expected in (
+            "Ubuntu 24.04",
+            "2 vCPU / 8 GiB",
+            "<你的公网IP>/32",
+            "127.0.0.1:8780",
+            "STRATEGY_EXECUTION_MODE=observe",
+            "git pull --ff-only origin main",
+        ):
+            self.assertIn(expected, deployment)
+        self.assertIn("Windows 在本项目中只充当运维面板客户端", windows)
+        self.assertIn("Open-VarLitDashboard.ps1", windows)
+        self.assertIn("adaptive-median-v6", architecture)
+        self.assertIn("execution-survival-v2", architecture)
+        self.assertIn("ExitOnForwardFailure=yes", client)
+        self.assertIn("127.0.0.1:8780", client)
+        for forbidden in ("LIGHTER_PRIVATE_KEY=", "0.0.0.0:8780"):
+            self.assertNotIn(forbidden, client)
 
 
 if __name__ == "__main__":

@@ -20,10 +20,7 @@ from .models import (
 
 
 BPS = Decimal("0.0001")
-EPOCH_PREFIXES = {
-    f"adaptive-median-v{version}": f"ame{version}"
-    for version in range(1, 7)
-}
+EPOCH_PREFIX = "ame6"
 # A finite sentinel keeps all serialized/validated financial values finite.
 # Rates can never approach this value in a valid market frame.
 NO_BALANCE_THRESHOLD = Decimal("-1000000000")
@@ -65,44 +62,21 @@ def compile_entry_opportunity(
 ) -> Decimal:
     """Return the directional rate that a fresh quote must clear.
 
-    V1/V2 retain their sealed weighted-Q80 behavior. V3 requires the quote to
-    exceed every live window median plus its sealed volatility cushion. V4
-    deliberately uses only a small fixed margin. V5 adapts that margin to 30m
-    MAD. V6 estimates a target upper quantile from each window's empirical
-    median-to-Q80 span, so the adjustment belongs to the market distribution
-    rather than a second execution gate.
+    The current formula estimates a target upper quantile from each window's
+    empirical median-to-Q80 span. The adjustment therefore belongs to the
+    market distribution rather than a second execution gate.
     """
 
     five, thirty, hourly = _windows(stats)
-    if model.model_version not in {
-        "adaptive-median-v3",
-        "adaptive-median-v4",
-        "adaptive-median-v5",
-        "adaptive-median-v6",
-    }:
-        return compile_q80(stats, model)
-    if model.model_version == "adaptive-median-v6":
-        quantile_fraction = (
-            Decimal(model.entry_quantile_pct - 50) / Decimal("30")
-        )
-        upper_spread = (
-            model.weight_5m * (five.q80 - five.median)
-            + model.weight_30m * (thirty.q80 - thirty.median)
-            + model.weight_1h * (hourly.q80 - hourly.median)
-        )
-        return (
-            max(five.median, thirty.median, hourly.median)
-            + quantile_fraction * upper_spread
-        )
-    margin = (
-        model.entry_median_margin_bps * BPS
-        if model.model_version == "adaptive-median-v4"
-        else max(
-            model.entry_median_margin_bps * BPS,
-            model.entry_mad_multiplier_30m * thirty.mad,
-        )
+    quantile_fraction = Decimal(model.entry_quantile_pct - 50) / Decimal("30")
+    upper_spread = (
+        model.weight_5m * (five.q80 - five.median)
+        + model.weight_30m * (thirty.q80 - thirty.median)
+        + model.weight_1h * (hourly.q80 - hourly.median)
     )
-    return max(five.median, thirty.median, hourly.median) + margin
+    return max(five.median, thirty.median, hourly.median) + (
+        quantile_fraction * upper_spread
+    )
 
 
 def compile_exit_opportunity(
@@ -111,19 +85,14 @@ def compile_exit_opportunity(
 ) -> Decimal:
     """Compile the favorable rate used to project a later exit.
 
-    V1 remains exactly median-based for evidence/recovery compatibility.  V2
-    uses Q95 from each live window; this affects whether an entry is worth
-    attempting, never the exact-price floor enforced when the position closes.
+    Q95 affects whether an entry is worth attempting, never the exact-price
+    floor enforced when the position closes.
     """
 
     five, thirty, hourly = _windows(stats)
-    if model.exit_quantile == 50:
-        return compile_baseline(stats, model)
-    if model.exit_quantile != 95:
-        raise ValueError("unsupported exit opportunity quantile")
     values = (five.q95, thirty.q95, hourly.q95)
     if any(value is None for value in values):
-        raise ValueError("Q95 is required for adaptive-median-v2/v3/v4/v5/v6")
+        raise ValueError("Q95 is required for adaptive-median-v6")
     return (
         model.weight_5m * values[0]
         + model.weight_30m * values[1]
@@ -252,22 +221,12 @@ def _component(
         wear_bps=wear_bps,
         reserve_bps_per_leg=reserve_bps_per_leg,
     )
-    if model.model_version in {
-        "adaptive-median-v4",
-        "adaptive-median-v5",
-        "adaptive-median-v6",
-    }:
-        final = entry_opportunity
-    elif model.model_version == "adaptive-median-v3":
-        final = max(entry_opportunity, balance)
-    else:
-        final = max(q80, economic, balance)
     return ThresholdComponents(
         baseline=baseline,
         q80=q80,
         economic=economic,
         balance=balance,
-        final=final,
+        final=entry_opportunity,
         mad_30m=thirty.mad,
         mad_1h=hourly.mad,
         exit_opportunity=exit_opportunity,
@@ -291,8 +250,6 @@ def build_parameter_candidate(
     """Compile a complete immutable proposal from ready window snapshots."""
 
     require_sha256("config_hash", config_hash)
-    buy_baseline = compile_baseline(stats[Side.BUY], model)
-    sell_baseline = compile_baseline(stats[Side.SELL], model)
     buy_exit_opportunity = compile_exit_opportunity(stats[Side.BUY], model)
     sell_exit_opportunity = compile_exit_opportunity(stats[Side.SELL], model)
     balances = balance_thresholds or {
@@ -301,11 +258,7 @@ def build_parameter_candidate(
     }
     buy = _component(
         own_stats=stats[Side.BUY],
-        opposite_exit_opportunity=(
-            sell_baseline
-            if model.model_version == "adaptive-median-v1"
-            else sell_exit_opportunity
-        ),
+        opposite_exit_opportunity=sell_exit_opportunity,
         balance=balances.get(Side.BUY, NO_BALANCE_THRESHOLD),
         wear_bps=max_normal_round_wear_bps,
         reserve_bps_per_leg=reserve_bps_per_leg,
@@ -313,11 +266,7 @@ def build_parameter_candidate(
     )
     sell = _component(
         own_stats=stats[Side.SELL],
-        opposite_exit_opportunity=(
-            buy_baseline
-            if model.model_version == "adaptive-median-v1"
-            else buy_exit_opportunity
-        ),
+        opposite_exit_opportunity=buy_exit_opportunity,
         balance=balances.get(Side.SELL, NO_BALANCE_THRESHOLD),
         wear_bps=max_normal_round_wear_bps,
         reserve_bps_per_leg=reserve_bps_per_leg,
@@ -343,7 +292,7 @@ def build_parameter_candidate(
         for minutes in (5, 30, 60)
     }
     return ParameterEpoch(
-        epoch_id=f"{EPOCH_PREFIXES[model.model_version]}-{identity}",
+        epoch_id=f"{EPOCH_PREFIX}-{identity}",
         model_version=model.model_version,
         model_hash=model.model_hash,
         config_hash=config_hash,
@@ -427,8 +376,7 @@ def _activated_epoch_id(
         f"{key}={int(value)}" for key, value in sorted(proposal.readiness.items())
     )
     identity = hashlib.sha256("|".join(fields).encode("utf-8")).hexdigest()[:16]
-    prefix = EPOCH_PREFIXES[proposal.model_version]
-    return f"{prefix}-{identity}"
+    return f"{EPOCH_PREFIX}-{identity}"
 
 
 class EpochActivator:
@@ -459,7 +407,7 @@ class EpochActivator:
             # The runtime only offers a proposal after all formal 5m/30m/1h
             # windows are complete.  Activate that first fully-qualified hour
             # immediately; later changes follow the configured confirmation
-            # count (production v3/v4/v5/v6 use one cold-path proposal).
+            # count (production uses one cold-path proposal).
             thresholds = proposal.thresholds
             expires_at_ms = max(
                 proposal.expires_at_ms,
@@ -521,18 +469,10 @@ class EpochActivator:
             mad_1h=proposal.thresholds.sell.mad_1h,
             model=self.model,
         )
-        if proposal.model_version in {
-            "adaptive-median-v3",
-            "adaptive-median-v4",
-            "adaptive-median-v5",
-            "adaptive-median-v6",
-        }:
-            # Upward protection must never be smoothed below the newly
-            # confirmed three-window gate.  Downward changes may still move
-            # gradually, which is conservative because a higher threshold
-            # only suppresses entries.
-            buy_final = max(buy_final, proposal.thresholds.buy.final)
-            sell_final = max(sell_final, proposal.thresholds.sell.final)
+        # Upward protection must never be smoothed below the newly confirmed
+        # three-window gate. Downward changes may still move gradually.
+        buy_final = max(buy_final, proposal.thresholds.buy.final)
+        sell_final = max(sell_final, proposal.thresholds.sell.final)
         # Even when the smoothed final thresholds remain inside the deadband,
         # two fresh confirmations roll the epoch forward.  Otherwise an
         # unchanged market lets the original epoch expire permanently and

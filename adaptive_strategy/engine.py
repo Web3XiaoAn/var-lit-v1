@@ -22,7 +22,10 @@ FIRM_NOTIONAL_TOLERANCE_USD = Decimal("1.00")
 # A close keeps half of the former phase reserve.  Open-side reserves remain
 # unchanged; this factor only affects exit eligibility and its Firm recheck.
 CLOSE_RESERVE_MULTIPLIER = Decimal("0.5")
-V5_MAX_STANDARDIZED_EXCESS = Decimal("3.0")
+MAX_STANDARDIZED_EXCESS = Decimal("3.0")
+LONG_HOLD_FLOOR_START_SECONDS = 60 * 60
+LONG_HOLD_FLOOR_STEP_SECONDS = 10 * 60
+LONG_HOLD_FLOOR_STEP_BPS = Decimal("0.2")
 
 
 def _phase_reserve_usd(epoch: ParameterEpoch, notional: Decimal) -> Decimal:
@@ -31,6 +34,37 @@ def _phase_reserve_usd(epoch: ParameterEpoch, notional: Decimal) -> Decimal:
 
 def _wear_usd(epoch: ParameterEpoch, notional: Decimal) -> Decimal:
     return notional * epoch.max_normal_round_wear_bps * BPS
+
+
+def long_hold_floor_adjustment_usd(
+    held_seconds: int,
+    notional_usd: Decimal,
+) -> Decimal:
+    """Return the extra loss allowance for one long-held position."""
+
+    if held_seconds < LONG_HOLD_FLOOR_START_SECONDS:
+        return ZERO
+    steps = 1 + (
+        held_seconds - LONG_HOLD_FLOOR_START_SECONDS
+    ) // LONG_HOLD_FLOOR_STEP_SECONDS
+    return notional_usd * Decimal(steps) * LONG_HOLD_FLOOR_STEP_BPS * BPS
+
+
+def close_floor_usd(
+    *,
+    held_seconds: int,
+    early_exit_seconds: int,
+    epoch: ParameterEpoch,
+    notional_usd: Decimal,
+) -> Decimal:
+    """Return the configured close floor plus long-hold stair steps."""
+
+    if held_seconds < early_exit_seconds:
+        return ZERO
+    return -_wear_usd(epoch, notional_usd) - long_hold_floor_adjustment_usd(
+        held_seconds,
+        notional_usd,
+    )
 
 
 class StrategyEngine:
@@ -99,12 +133,8 @@ class StrategyEngine:
     ) -> str | None:
         """Return the single authoritative dynamic-threshold admission result."""
 
-        if model_version not in {
-            "adaptive-median-v4",
-            "adaptive-median-v5",
-            "adaptive-median-v6",
-        }:
-            return None
+        if model_version != "adaptive-median-v6":
+            raise ValueError("unsupported adaptive strategy model")
         if side is Side.BUY:
             return (
                 "buy_dynamic_threshold_not_above_hard_limit"
@@ -161,17 +191,7 @@ class StrategyEngine:
                 continue
             actual_rate = frame.actual_rates.for_side(side)
             opposite_component = epoch.component(side.opposite)
-            projected_exit_rate = (
-                opposite_component.exit_opportunity
-                if epoch.model_version in {
-                    "adaptive-median-v2",
-                    "adaptive-median-v3",
-                    "adaptive-median-v4",
-                    "adaptive-median-v5",
-                    "adaptive-median-v6",
-                }
-                else opposite_component.baseline
-            )
+            projected_exit_rate = opposite_component.exit_opportunity
             reference_open = epoch.reference_notional_usd * reference_rate
             reference_close = epoch.reference_notional_usd * projected_exit_rate
             reference_reserve = Decimal("2") * _phase_reserve_usd(
@@ -183,10 +203,7 @@ class StrategyEngine:
                 epoch, epoch.order_notional_usd
             )
             score = (reference_rate - component.final) / max(component.mad_30m, self.epsilon)
-            if (
-                epoch.model_version in {"adaptive-median-v5", "adaptive-median-v6"}
-                and score > V5_MAX_STANDARDIZED_EXCESS
-            ):
+            if score > MAX_STANDARDIZED_EXCESS:
                 continue
             candidates.append(OpenCandidate(
                 direction=side,
@@ -267,43 +284,20 @@ class StrategyEngine:
         if reference_rate < candidate.threshold:
             return Decision(Action.NO_ACTION, "firm_reference_rate_below_frozen_threshold")
         if (
-            epoch.model_version in {"adaptive-median-v5", "adaptive-median-v6"}
-            and (
-                reference_rate - candidate.threshold
-            ) / max(epoch.component(candidate.direction).mad_30m, self.epsilon)
-            > V5_MAX_STANDARDIZED_EXCESS
+            (reference_rate - candidate.threshold)
+            / max(epoch.component(candidate.direction).mad_30m, self.epsilon)
+            > MAX_STANDARDIZED_EXCESS
         ):
             return Decision(Action.NO_ACTION, "firm_reference_rate_above_spike_band")
         actual_rate = firm_frame.actual_rates.for_side(candidate.direction)
         if actual_rate < candidate.threshold:
             return Decision(Action.NO_ACTION, "firm_rate_below_frozen_threshold")
         opposite_component = epoch.component(candidate.direction.opposite)
-        projected_exit_rate = (
-            opposite_component.exit_opportunity
-            if epoch.model_version in {
-                "adaptive-median-v2",
-                "adaptive-median-v3",
-                "adaptive-median-v4",
-                "adaptive-median-v5",
-                "adaptive-median-v6",
-            }
-            else opposite_component.baseline
-        )
+        projected_exit_rate = opposite_component.exit_opportunity
         open_pnl = firm_notional_usd * actual_rate
         close_credit = firm_notional_usd * projected_exit_rate
         round_reserve = Decimal("2") * _phase_reserve_usd(epoch, firm_notional_usd)
         lower_bound = open_pnl + close_credit - round_reserve
-        if (
-            epoch.model_version
-            not in {
-                "adaptive-median-v3",
-                "adaptive-median-v4",
-                "adaptive-median-v5",
-                "adaptive-median-v6",
-            }
-            and lower_bound < -_wear_usd(epoch, firm_notional_usd)
-        ):
-            return Decision(Action.NO_ACTION, "firm_round_lower_bound_below_wear_floor")
         confirmed = OpenCandidate(
             direction=candidate.direction,
             frame_captured_at_ms=firm_frame.captured_at_ms,
@@ -358,8 +352,11 @@ class StrategyEngine:
         lower_bound = position.actual_open_pnl_usd + close_pnl - close_reserve
         # The normal-wear allowance remains tied to the actual opening amount;
         # only the still-hypothetical close reserve scales with current value.
-        floor = ZERO if held_seconds < self.early_exit_seconds else -_wear_usd(
-            epoch, position.actual_notional_usd
+        floor = close_floor_usd(
+            held_seconds=held_seconds,
+            early_exit_seconds=self.early_exit_seconds,
+            epoch=epoch,
+            notional_usd=position.actual_notional_usd,
         )
         max_hold_alert = held_seconds >= self.max_hold_seconds
         candidate = CloseCandidate(
@@ -376,10 +373,7 @@ class StrategyEngine:
             regression_passed=regression_passed,
             max_hold_alert=max_hold_alert,
         )
-        regression_required = epoch.model_version == "adaptive-median-v1"
-        floor_passed = lower_bound >= floor and (
-            regression_passed or not regression_required
-        )
+        floor_passed = lower_bound >= floor
         if floor_passed and held_seconds < self.early_exit_seconds:
             return Decision(
                 Action.NO_ACTION,
@@ -389,16 +383,9 @@ class StrategyEngine:
         if floor_passed:
             reason = "max_hold_alert_floor_passed" if max_hold_alert else "close_floor_passed"
             return Decision(Action.CLOSE, reason, close_candidate=candidate)
-        if regression_required and not regression_passed:
-            reason = (
-                "max_hold_alert_waiting_baseline_regression"
-                if max_hold_alert
-                else "close_baseline_regression_not_met"
-            )
-        else:
-            reason = (
-                "max_hold_alert_waiting_controlled_floor"
-                if max_hold_alert
-                else "close_floor_not_met"
-            )
+        reason = (
+            "max_hold_alert_waiting_controlled_floor"
+            if max_hold_alert
+            else "close_floor_not_met"
+        )
         return Decision(Action.NO_ACTION, reason, close_candidate=candidate)

@@ -336,7 +336,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--phase", choices=("local", "server"), default="local")
     parser.add_argument("--project-dir", type=Path, default=PROJECT_ROOT)
-    parser.add_argument("--config", type=Path, default=PROJECT_ROOT / ".env")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path(os.environ.get("VARIATIONAL_ENV_FILE", PROJECT_ROOT / ".env")),
+    )
     parser.add_argument("--chrome-profile", type=Path, default=None)
     return parser.parse_args()
 

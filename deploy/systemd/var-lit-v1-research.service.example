@@ -7,7 +7,8 @@ Type=simple
 User=varlit
 Group=varlit
 WorkingDirectory=/opt/var-lit-v1
-ExecStartPre=/usr/bin/test -f /opt/var-lit-v1/.env
+Environment=VARIATIONAL_ENV_FILE=/var/lib/var-lit-v1/runtime.env
+ExecStartPre=/usr/bin/test -f /var/lib/var-lit-v1/runtime.env
 ExecStart=/opt/var-lit-v1/venv/bin/python /opt/var-lit-v1/tools/sync_research_database.py --follow --interval 5 --max-mib 900
 Restart=always
 RestartSec=5

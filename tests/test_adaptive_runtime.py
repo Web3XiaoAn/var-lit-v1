@@ -27,7 +27,6 @@ from main import (
 )
 from tests.test_dashboard_calculations import make_open_candidate, make_record
 from adaptive_strategy.serialization import open_candidate_to_payload
-from adaptive_strategy.model_config import load_model_config
 
 
 class AdaptiveRuntimeTests(unittest.TestCase):
@@ -51,6 +50,36 @@ class AdaptiveRuntimeTests(unittest.TestCase):
                 "state": "OBSERVING",
             },
         }
+
+    def test_persist_does_not_overwrite_existing_state_before_restore(self) -> None:
+        async def run_case() -> None:
+            runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
+            runtime.variational_ticker = "BTC"
+            runtime._runtime_state_loaded = False
+            with tempfile.TemporaryDirectory(prefix="state-restore-guard-") as tmp:
+                state_file = Path(tmp) / "runtime_state.json"
+                original = {"sentinel": "preserve"}
+                state_file.write_text(json.dumps(original), encoding="utf-8")
+                with patch.object(main_module, "RUNTIME_STATE_FILE", state_file):
+                    await runtime.persist_runtime_state()
+
+                self.assertEqual(
+                    json.loads(state_file.read_text(encoding="utf-8")),
+                    original,
+                )
+                self.assertFalse(runtime._runtime_state_loaded)
+
+        asyncio.run(run_case())
+
+    def test_atomic_runtime_state_write_uses_private_permissions(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="state-permissions-") as tmp:
+            state_file = Path(tmp) / "runtime_state.json"
+            VariationalToLighterRuntime._write_json_atomic(
+                state_file,
+                {"asset": "BTC"},
+            )
+
+            self.assertEqual(state_file.stat().st_mode & 0o777, 0o600)
 
     def test_observe_mode_exposes_candidate_but_returns_no_order_signal(self) -> None:
         async def run_case() -> None:
@@ -486,7 +515,6 @@ class AdaptiveRuntimeTests(unittest.TestCase):
                 history,
                 asset="BTC",
                 reference_notional_usd=Decimal("500"),
-                order_notional_usd=Decimal("200"),
                 now_ms=now_ms,
             )
             self.assertEqual(state, "pending_first_live_frame")
@@ -498,11 +526,10 @@ class AdaptiveRuntimeTests(unittest.TestCase):
                     history,
                     asset="BTC",
                     reference_notional_usd=Decimal("500"),
-                    order_notional_usd=Decimal("200"),
                     now_ms=now_ms + main_module.STRATEGY_HISTORY_RESUME_MAX_GAP_MS + 1,
                 )
             )
-            self.assertEqual(stale_state, "history_stale_over_5m")
+            self.assertEqual(stale_state, "history_stale_over_2m")
             self.assertEqual(stale_samples, [])
 
     def test_restart_history_loader_resumes_partial_current_session(self) -> None:
@@ -538,7 +565,6 @@ class AdaptiveRuntimeTests(unittest.TestCase):
                 history,
                 asset="BTC",
                 reference_notional_usd=Decimal("500"),
-                order_notional_usd=Decimal("200"),
                 now_ms=now_ms,
                 minimum_timestamp_ms=session_start_ms,
             )
@@ -548,7 +574,83 @@ class AdaptiveRuntimeTests(unittest.TestCase):
             self.assertEqual(samples[0][0], session_start_ms)
             self.assertEqual(samples[-1][0], now_ms)
             self.assertEqual(samples[-1][0] - samples[0][0], 40 * 60 * 1_000)
-            self.assertTrue(all(rates.buy == Decimal("0.001") for _, rates in samples))
+            self.assertTrue(
+                all(rates.buy == Decimal("0.001") for _, rates, _ in samples)
+            )
+
+    def test_restart_history_loader_bridges_only_two_minute_process_restart(self) -> None:
+        now_ms = 20_000_000
+
+        def row(timestamp_ms: int, session_id: str, order_notional: str) -> str:
+            return json.dumps(
+                {
+                    "version": main_module.STRATEGY_MARKET_SAMPLE_VERSION,
+                    "session_id": session_id,
+                    "valid": True,
+                    "asset": "BTC",
+                    "reference_notional_usd": "500",
+                    "order_notional_usd": order_notional,
+                    "reference_buy_rate": "0.001",
+                    "reference_sell_rate": "-0.001",
+                    "sample_timestamp_ms": timestamp_ms,
+                }
+            )
+
+        with tempfile.TemporaryDirectory(prefix="adaptive-restart-history-") as tmp:
+            history = Path(tmp) / "strategy_market_samples.jsonl"
+            old_end_ms = now_ms - 90_000
+            rows = [
+                row(old_end_ms - offset * 1_000, "before", "200")
+                for offset in reversed(range(601))
+            ]
+            rows.extend(
+                row(now_ms - offset * 1_000, "after", "500")
+                for offset in reversed(range(11))
+            )
+            history.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+            state, samples, _ = VariationalToLighterRuntime._read_strategy_sample_history(
+                history,
+                asset="BTC",
+                reference_notional_usd=Decimal("500"),
+                now_ms=now_ms,
+            )
+
+            self.assertEqual(state, "pending_partial_history")
+            self.assertEqual(samples[0][0], old_end_ms - 600_000)
+            self.assertEqual(sum(bridges for _, _, bridges in samples), 1)
+
+            rows[-11:] = [
+                row(now_ms - offset * 1_000, "before", "500")
+                for offset in reversed(range(11))
+            ]
+            history.write_text("\n".join(rows) + "\n", encoding="utf-8")
+            _, same_session_samples, _ = (
+                VariationalToLighterRuntime._read_strategy_sample_history(
+                    history,
+                    asset="BTC",
+                    reference_notional_usd=Decimal("500"),
+                    now_ms=now_ms,
+                )
+            )
+            self.assertEqual(len(same_session_samples), 11)
+            self.assertFalse(any(bridge for _, _, bridge in same_session_samples))
+
+            rows[-11:] = [
+                row(now_ms + 41_000 - offset * 1_000, "after", "500")
+                for offset in reversed(range(11))
+            ]
+            history.write_text("\n".join(rows) + "\n", encoding="utf-8")
+            _, over_limit_samples, _ = (
+                VariationalToLighterRuntime._read_strategy_sample_history(
+                    history,
+                    asset="BTC",
+                    reference_notional_usd=Decimal("500"),
+                    now_ms=now_ms + 41_000,
+                )
+            )
+            self.assertEqual(len(over_limit_samples), 11)
+            self.assertFalse(any(bridge for _, _, bridge in over_limit_samples))
 
     def test_runtime_reads_current_sample_session_cutoff(self) -> None:
         with tempfile.TemporaryDirectory(prefix="adaptive-session-cutoff-") as tmp:
@@ -603,7 +705,6 @@ class AdaptiveRuntimeTests(unittest.TestCase):
                 history,
                 asset="BTC",
                 reference_notional_usd=Decimal("500"),
-                order_notional_usd=Decimal("200"),
                 now_ms=now_ms,
             )
 
@@ -612,7 +713,9 @@ class AdaptiveRuntimeTests(unittest.TestCase):
             self.assertEqual(samples[0][0], now_ms - main_module.STRATEGY_STATISTICS_WINDOW_MS)
             self.assertEqual(samples[-1][0], now_ms)
             self.assertEqual(len(samples), 3_601)
-            self.assertTrue(all(rates.buy == Decimal("0.001") for _, rates in samples))
+            self.assertTrue(
+                all(rates.buy == Decimal("0.001") for _, rates, _ in samples)
+            )
 
     def test_firm_amount_outside_target_tolerance_rejects_without_halting(self) -> None:
         async def run_case() -> None:
@@ -951,184 +1054,6 @@ class AdaptiveRuntimeTests(unittest.TestCase):
                 with patch.object(main_module, "RUNTIME_STATE_FILE", state_file):
                     self.assertTrue(await runtime.load_runtime_state("BTC"))
             self.assertEqual(runtime._canary_session_state, CANARY_SESSION_HALTED)
-
-        asyncio.run(run_case())
-
-    def test_restore_legacy_loss_halt_keeps_metrics_but_resumes_live(self) -> None:
-        async def run_case() -> None:
-            runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
-            runtime.strategy_config.execution_mode = "live"
-            payload = self._empty_runtime_payload(runtime)
-            payload["canary_session"].update(
-                {
-                    "round_count": 3,
-                    "cumulative_loss_usd": "1.25",
-                    "consecutive_losses": 2,
-                    "state": "HALTED",
-                }
-            )
-            with tempfile.TemporaryDirectory(prefix="adaptive-state-") as tmp:
-                state_file = Path(tmp) / "runtime_state.json"
-                state_file.write_text(json.dumps(payload), encoding="utf-8")
-                with patch.object(main_module, "RUNTIME_STATE_FILE", state_file):
-                    self.assertTrue(await runtime.load_runtime_state("BTC"))
-
-            self.assertFalse(runtime.automation_paused)
-            self.assertEqual(runtime._canary_session_state, main_module.CANARY_SESSION_OBSERVING)
-            self.assertEqual(runtime._canary_round_count, 3)
-            self.assertEqual(runtime._canary_cumulative_loss_usd, Decimal("1.25"))
-            self.assertEqual(runtime._canary_consecutive_losses, 2)
-
-        asyncio.run(run_case())
-
-    def test_v4_upgrade_clears_only_flat_empty_v3_halt(self) -> None:
-        async def run_case() -> None:
-            runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
-            payload = self._empty_runtime_payload(runtime)
-            old_model = load_model_config(
-                Path(main_module.__file__).resolve().parent
-                / "adaptive_strategy"
-                / "models"
-                / "adaptive-median-v3.json"
-            )
-            payload["strategy_model"] = old_model.model_version
-            payload["strategy_model_hash"] = old_model.model_hash
-            payload["canary_session"]["state"] = "HALTED"
-            with tempfile.TemporaryDirectory(prefix="adaptive-v4-migration-") as tmp:
-                state_file = Path(tmp) / "runtime_state.json"
-                state_file.write_text(json.dumps(payload), encoding="utf-8")
-                with patch.object(main_module, "RUNTIME_STATE_FILE", state_file):
-                    self.assertFalse(await runtime.load_runtime_state("BTC"))
-
-            self.assertEqual(
-                runtime._canary_session_state,
-                main_module.CANARY_SESSION_OBSERVING,
-            )
-            self.assertFalse(runtime.automation_paused)
-            self.assertIsNone(runtime.pending_var_intent)
-
-        asyncio.run(run_case())
-
-    def test_v4_upgrade_clears_flat_v3_loss_halt_but_not_loss_metrics(self) -> None:
-        async def run_case() -> None:
-            runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
-            payload = self._empty_runtime_payload(runtime)
-            old_model = load_model_config(
-                Path(main_module.__file__).resolve().parent
-                / "adaptive_strategy"
-                / "models"
-                / "adaptive-median-v3.json"
-            )
-            payload["strategy_model"] = old_model.model_version
-            payload["strategy_model_hash"] = old_model.model_hash
-            payload["canary_session"].update(
-                {"state": "HALTED", "cumulative_loss_usd": "0.01"}
-            )
-            with tempfile.TemporaryDirectory(prefix="adaptive-v4-loss-") as tmp:
-                state_file = Path(tmp) / "runtime_state.json"
-                state_file.write_text(json.dumps(payload), encoding="utf-8")
-                with patch.object(main_module, "RUNTIME_STATE_FILE", state_file):
-                    self.assertFalse(await runtime.load_runtime_state("BTC"))
-
-            self.assertFalse(runtime.automation_paused)
-            self.assertEqual(runtime._canary_session_state, main_module.CANARY_SESSION_OBSERVING)
-
-        asyncio.run(run_case())
-
-    def test_v5_upgrade_restores_only_manual_exposure_and_reconciliation_pause(self) -> None:
-        async def run_case() -> None:
-            runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
-            payload = self._empty_runtime_payload(runtime)
-            old_model = load_model_config(
-                Path(main_module.__file__).resolve().parent
-                / "adaptive_strategy"
-                / "models"
-                / "adaptive-median-v4.json"
-            )
-            payload["strategy_model"] = old_model.model_version
-            payload["strategy_model_hash"] = old_model.model_hash
-            record = main_module.OrderLifecycle(
-                trade_key="manual-open",
-                trade_id="manual-open",
-                side="sell",
-                qty=Decimal("0.003091"),
-                asset="BTC",
-                auto_hedge_enabled=True,
-                last_variational_status="filled",
-                var_fill_price=Decimal("63560.96"),
-                var_fill_ts_iso=datetime.now(timezone.utc).isoformat(),
-                var_fill_source="event",
-                strategy_phase="open",
-                strategy_tag=main_module.MANUAL_STRATEGY_TAG,
-                open_notional_usd=Decimal("196.46692736"),
-                lighter_side="BUY",
-                lighter_client_order_id=42,
-                lighter_client_order_ids=[42],
-                lighter_fill_price=Decimal("63604.9"),
-                lighter_filled_qty=Decimal("0.00309"),
-                lighter_filled_quote=Decimal("196.539141"),
-                lighter_fill_ts_iso=datetime.now(timezone.utc).isoformat(),
-                lighter_outcome_final=True,
-                hedge_status="filled",
-                execution_state="HEDGED",
-            )
-            payload["records"] = [record.to_payload()]
-            payload["lighter_order_cumulative"] = [
-                {
-                    "client_order_id": 42,
-                    "filled_base": "0.00309",
-                    "filled_quote": "196.539141",
-                    "terminal": True,
-                }
-            ]
-            pause_reason = (
-                "Account reconciliation failed: FRESH_MISMATCH: "
-                "Var 0/-0.003091, Lighter 0/0.00309, active=0"
-            )
-            payload["automation_paused"] = True
-            payload["automation_pause_reason"] = pause_reason
-            with tempfile.TemporaryDirectory(prefix="adaptive-v5-manual-") as tmp:
-                state_file = Path(tmp) / "runtime_state.json"
-                state_file.write_text(json.dumps(payload), encoding="utf-8")
-                with patch.object(main_module, "RUNTIME_STATE_FILE", state_file):
-                    self.assertTrue(await runtime.load_runtime_state("BTC"))
-
-            self.assertIn("manual-open", runtime.records)
-            self.assertTrue(runtime.automation_paused)
-            self.assertEqual(runtime._reconcile_pause_reason, pause_reason)
-
-        asyncio.run(run_case())
-
-    def test_flat_v4_recalibration_preserves_completed_round_metrics(self) -> None:
-        async def run_case() -> None:
-            runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
-            payload = self._empty_runtime_payload(runtime)
-            payload["strategy_model_hash"] = next(
-                iter(main_module.MIGRATABLE_FLAT_V4_MODEL_HASHES)
-            )
-            payload["last_round_closed_at"] = 123.5
-            payload["canary_session"].update(
-                {
-                    "round_count": 7,
-                    "cumulative_loss_usd": "0.4429522",
-                    "consecutive_losses": 7,
-                    "state": "ARMED",
-                }
-            )
-            with tempfile.TemporaryDirectory(prefix="adaptive-v4-recalibration-") as tmp:
-                state_file = Path(tmp) / "runtime_state.json"
-                state_file.write_text(json.dumps(payload), encoding="utf-8")
-                with patch.object(main_module, "RUNTIME_STATE_FILE", state_file):
-                    self.assertTrue(await runtime.load_runtime_state("BTC"))
-
-            self.assertEqual(runtime._canary_round_count, 7)
-            self.assertEqual(
-                runtime._canary_cumulative_loss_usd,
-                Decimal("0.4429522"),
-            )
-            self.assertEqual(runtime._canary_consecutive_losses, 7)
-            self.assertEqual(runtime._last_round_closed_at, 123.5)
-            self.assertFalse(runtime.automation_paused)
 
         asyncio.run(run_case())
 

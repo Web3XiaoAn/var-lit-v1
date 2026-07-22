@@ -272,7 +272,9 @@ class ReconciliationFreshnessTests(unittest.TestCase):
                 request_id="portfolio-stream-mismatch",
                 captured_at=(now + timedelta(seconds=6)).isoformat(),
             )
-            self.assertFalse(await runtime.reconcile_accounts())
+            self.assertFalse(
+                await runtime.reconcile_accounts(after_page_refresh=True)
+            )
             self.assertEqual(
                 runtime.last_reconcile_outcome,
                 AccountReconcileOutcome.FRESH_MISMATCH,
@@ -361,7 +363,7 @@ class ReconciliationFreshnessTests(unittest.TestCase):
                 now - timedelta(seconds=1),
             )
             opened.qty = Decimal("0.003091")
-            opened.strategy_tag = "adaptive-median-v5"
+            opened.strategy_tag = "adaptive-median-v6"
             opened.strategy_phase = "open"
             runtime.records = {opened.trade_key: opened}
             runtime.record_order.append(opened.trade_key)

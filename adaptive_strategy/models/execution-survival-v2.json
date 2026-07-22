@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "modelVersion": "execution-survival-v2",
+  "trainedAtUtc": "2026-07-21T08:04:00Z",
+  "targetHorizonMs": 450,
+  "targetSurvivalProbability": "0.92",
+  "trainingMethod": "chronological-first-80-calibrate-last-20",
+  "features": [
+    "thresholdBufferBps",
+    "fiveSecondRangeBps",
+    "directionalImbalance1Bps",
+    "directionalBookFlow1000",
+    "directionalTradeFlow100",
+    "directionalMicropriceBps"
+  ],
+  "assets": {
+    "BTC": {
+      "BUY": {
+        "trainCount": 3238,
+        "calibrationCount": 644,
+        "calibrationSelected": 250,
+        "calibrationSurvival": "0.92",
+        "meanBufferBps": "0.24227933123955733",
+        "stdBufferBps": "0.25091925542586296",
+        "meanRange5Bps": "0.5143008764916055",
+        "stdRange5Bps": "0.45376418081513425",
+        "intercept": "1.213018789100353",
+        "bufferCoefficient": "0.2051638304410263",
+        "rangeCoefficient": "-0.5125588432219234",
+        "gateLogit": "1.3134763884435181",
+        "adverseFeatureQuantile": "0.30",
+        "vetoCount": 2,
+        "minimums": {
+          "directionalImbalance1Bps": "-0.5566921586855059",
+          "directionalBookFlow1000": "-0.3717398404145656",
+          "directionalTradeFlow100": "0",
+          "directionalMicropriceBps": "-0.007666717927770436"
+        }
+      },
+      "SELL": {
+        "trainCount": 3278,
+        "calibrationCount": 986,
+        "calibrationSelected": 266,
+        "calibrationSurvival": "0.9210526315789473",
+        "meanBufferBps": "0.27740838383793714",
+        "stdBufferBps": "0.3516798643687544",
+        "meanRange5Bps": "0.5577328227923104",
+        "stdRange5Bps": "0.4635948703314453",
+        "intercept": "1.1204835373001372",
+        "bufferCoefficient": "0.2976263575464947",
+        "rangeCoefficient": "-0.5138195710116911",
+        "gateLogit": "1.3263598085094941",
+        "adverseFeatureQuantile": "0.30",
+        "vetoCount": 2,
+        "minimums": {
+          "directionalImbalance1Bps": "-0.6274318618405637",
+          "directionalBookFlow1000": "-0.3720837368881667",
+          "directionalTradeFlow100": "0",
+          "directionalMicropriceBps": "-0.007677001510185929"
+        }
+      }
+    }
+  }
+}

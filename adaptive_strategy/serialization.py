@@ -86,16 +86,6 @@ def _decimal(payload: Mapping[str, Any], key: str) -> Decimal:
 
 
 def _component(payload: Mapping[str, Any]) -> ThresholdComponents:
-    exit_opportunity = (
-        _decimal(payload, "exitOpportunity")
-        if "exitOpportunity" in payload
-        else _decimal(payload, "baseline")
-    )
-    entry_opportunity = (
-        _decimal(payload, "entryOpportunity")
-        if "entryOpportunity" in payload
-        else _decimal(payload, "q80")
-    )
     return ThresholdComponents(
         baseline=_decimal(payload, "baseline"),
         q80=_decimal(payload, "q80"),
@@ -104,8 +94,8 @@ def _component(payload: Mapping[str, Any]) -> ThresholdComponents:
         final=_decimal(payload, "final"),
         mad_30m=_decimal(payload, "mad30m"),
         mad_1h=_decimal(payload, "mad1h"),
-        exit_opportunity=exit_opportunity,
-        entry_opportunity=entry_opportunity,
+        exit_opportunity=_decimal(payload, "exitOpportunity"),
+        entry_opportunity=_decimal(payload, "entryOpportunity"),
     )
 
 
@@ -144,14 +134,10 @@ def open_candidate_from_payload(payload: Mapping[str, Any] | None) -> OpenCandid
     if not isinstance(payload, Mapping):
         return None
     strategy_tag = payload.get("strategyTag")
-    if payload.get("schema") != CONTEXT_SCHEMA or strategy_tag not in {
-        "adaptive-median-v1",
-        "adaptive-median-v2",
-        "adaptive-median-v3",
-        "adaptive-median-v4",
-        "adaptive-median-v5",
-        "adaptive-median-v6",
-    }:
+    if (
+        payload.get("schema") != CONTEXT_SCHEMA
+        or strategy_tag != "adaptive-median-v6"
+    ):
         return None
     try:
         epoch_payload = payload["epoch"]

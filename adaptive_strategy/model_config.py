@@ -1,4 +1,4 @@
-"""Versioned model artifact loader.
+"""Sealed adaptive-median-v6 model artifact loader.
 
 Disk access is confined to deployment/configuration.  The returned immutable
 object is injected into the pure strategy components before runtime starts.
@@ -23,34 +23,9 @@ from .models import (
 )
 
 
-ADAPTIVE_MODEL_ARTIFACT_SHA256 = {
-    "adaptive-median-v1": (
-        "bcc87280c90fc28fdfbb856dbe355f99aa850c343e826b0742a3012c32b63c53"
-    ),
-    # Filled from the immutable artifact bytes below.  A formula or
-    # calibration edit must update both the versioned file and this seal.
-    "adaptive-median-v2": (
-        "cd6e44f51d2784037200114047c2691422cb20a24a416c2c88a942798d0d140e"
-    ),
-    # v3 replaces the weighted entry quantile with the three-window median gate.
-    "adaptive-median-v3": (
-        "9229d17952f166ce7cd916475b23a5839817f932c37b0c8c6a52affe7497f38c"
-    ),
-    # v4 uses the three-window maximum plus a small fixed margin. Directional
-    # balance and execution-loss history remain diagnostics, not entry vetoes.
-    "adaptive-median-v4": (
-        "7a54394321206eabc70c0efc0e4a9b94132f202c2fd833b058049db8cacc804d"
-    ),
-    # v5 keeps the three-window gate, adapts its cushion to 30m MAD and adds
-    # pre-trade spike/short-range execution-quality gates in the runtime.
-    "adaptive-median-v5": (
-        "cfd7c30dd391bdb79432135c034c3a044e82451dc10a60d7c7fb945157e2083d"
-    ),
-    # v6 replaces fixed/MAD additions with a weighted empirical quantile.
-    "adaptive-median-v6": (
-        "dd4450ee3e53f7d2e185f12b45010767a50df1f8192ce42209a145d9e8917dbc"
-    ),
-}
+MODEL_VERSION = "adaptive-median-v6"
+# A formula or calibration edit must update both the immutable artifact and seal.
+MODEL_ARTIFACT_SHA256 = "92731954f30a202ed182a95eb469308de16411b83ee6d184876968cd1296c799"
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,8 +43,6 @@ class ModelConfig:
     weight_30m: Decimal
     weight_1h: Decimal
     exit_quantile: int
-    entry_median_margin_bps: Decimal
-    entry_mad_multiplier_30m: Decimal
     entry_quantile_pct: int
     opportunity_merge_seconds: int
     balance_ratio_limit: Decimal
@@ -77,7 +50,7 @@ class ModelConfig:
     epsilon: Decimal
 
     def __post_init__(self) -> None:
-        if self.model_version not in ADAPTIVE_MODEL_ARTIFACT_SHA256:
+        if self.model_version != MODEL_VERSION:
             raise ValueError("unsupported adaptive strategy model")
         require_sha256("model_hash", self.model_hash)
         if self.asset != "BTC":
@@ -91,14 +64,6 @@ class ModelConfig:
         require_non_negative("weight_5m", self.weight_5m)
         require_non_negative("weight_30m", self.weight_30m)
         require_non_negative("weight_1h", self.weight_1h)
-        require_non_negative(
-            "entry_median_margin_bps",
-            self.entry_median_margin_bps,
-        )
-        require_non_negative(
-            "entry_mad_multiplier_30m",
-            self.entry_mad_multiplier_30m,
-        )
         if self.weight_5m + self.weight_30m + self.weight_1h != Decimal("1"):
             raise ValueError("5m/30m/1h weights must sum to one")
         if not 1 <= self.exit_quantile <= 100:
@@ -111,55 +76,6 @@ class ModelConfig:
         require_positive("epsilon", self.epsilon)
         if self.opportunity_merge_seconds <= 0:
             raise ValueError("opportunity_merge_seconds must be positive")
-        versioned_formula = {
-            "adaptive-median-v1": {
-                "weight_5m": Decimal("0.15"),
-                "weight_30m": Decimal("0.55"),
-                "weight_1h": Decimal("0.30"),
-                "exit_quantile": 50,
-            },
-            "adaptive-median-v2": {
-                "weight_5m": Decimal("0.25"),
-                "weight_30m": Decimal("0.45"),
-                "weight_1h": Decimal("0.30"),
-                "exit_quantile": 95,
-                "entry_median_margin_bps": Decimal("0"),
-                "entry_mad_multiplier_30m": Decimal("0"),
-            },
-            "adaptive-median-v3": {
-                "weight_5m": Decimal("0.25"),
-                "weight_30m": Decimal("0.45"),
-                "weight_1h": Decimal("0.30"),
-                "exit_quantile": 95,
-                "entry_median_margin_bps": Decimal("0.50"),
-                "entry_mad_multiplier_30m": Decimal("0.25"),
-            },
-            "adaptive-median-v4": {
-                "weight_5m": Decimal("0.25"),
-                "weight_30m": Decimal("0.45"),
-                "weight_1h": Decimal("0.30"),
-                "exit_quantile": 95,
-                "entry_median_margin_bps": Decimal("0.10"),
-                "entry_mad_multiplier_30m": Decimal("0"),
-            },
-            "adaptive-median-v5": {
-                "weight_5m": Decimal("0.25"),
-                "weight_30m": Decimal("0.45"),
-                "weight_1h": Decimal("0.30"),
-                "exit_quantile": 95,
-                "entry_median_margin_bps": Decimal("0.05"),
-                "entry_mad_multiplier_30m": Decimal("0.20"),
-            },
-            "adaptive-median-v6": {
-                "weight_5m": Decimal("0.25"),
-                "weight_30m": Decimal("0.45"),
-                "weight_1h": Decimal("0.30"),
-                "exit_quantile": 95,
-                "entry_median_margin_bps": Decimal("0"),
-                "entry_mad_multiplier_30m": Decimal("0"),
-                "entry_quantile_pct": 58,
-            },
-        }[self.model_version]
         fixed_formula = {
             "reference_notional_usd": (
                 self.reference_notional_usd,
@@ -167,46 +83,14 @@ class ModelConfig:
             ),
             "deadband_mad_1h": (self.deadband_mad_1h, Decimal("0.25")),
             "max_step_mad_1h": (self.max_step_mad_1h, Decimal("0.50")),
-            "weight_5m": (self.weight_5m, versioned_formula["weight_5m"]),
-            "weight_30m": (self.weight_30m, versioned_formula["weight_30m"]),
-            "weight_1h": (self.weight_1h, versioned_formula["weight_1h"]),
-            "exit_quantile": (
-                self.exit_quantile,
-                versioned_formula["exit_quantile"],
-            ),
-            "entry_median_margin_bps": (
-                self.entry_median_margin_bps,
-                versioned_formula.get(
-                    "entry_median_margin_bps",
-                    Decimal("0"),
-                ),
-            ),
-            "entry_mad_multiplier_30m": (
-                self.entry_mad_multiplier_30m,
-                versioned_formula.get(
-                    "entry_mad_multiplier_30m",
-                    Decimal("0"),
-                ),
-            ),
-            "entry_quantile_pct": (
-                self.entry_quantile_pct,
-                versioned_formula.get("entry_quantile_pct", 50),
-            ),
-            "opportunity_merge_seconds": (
-                self.opportunity_merge_seconds,
-                15,
-            ),
-            "balance_ratio_limit": (
-                self.balance_ratio_limit,
-                Decimal("2"),
-            ),
-            "balance_minimum_events": (
-                self.balance_minimum_events,
-                8
-                if self.model_version
-                in {"adaptive-median-v4", "adaptive-median-v5", "adaptive-median-v6"}
-                else 0,
-            ),
+            "weight_5m": (self.weight_5m, Decimal("0.25")),
+            "weight_30m": (self.weight_30m, Decimal("0.45")),
+            "weight_1h": (self.weight_1h, Decimal("0.30")),
+            "exit_quantile": (self.exit_quantile, 95),
+            "entry_quantile_pct": (self.entry_quantile_pct, 58),
+            "opportunity_merge_seconds": (self.opportunity_merge_seconds, 15),
+            "balance_ratio_limit": (self.balance_ratio_limit, Decimal("2")),
+            "balance_minimum_events": (self.balance_minimum_events, 8),
         }
         changed = [
             name
@@ -239,10 +123,9 @@ def load_model_config(path: str | Path) -> ModelConfig:
         raise ValueError("unsupported model artifact schema")
     artifact_hash = hashlib.sha256(raw).hexdigest()
     model_version = str(payload.get("modelVersion") or "")
-    expected_hash = ADAPTIVE_MODEL_ARTIFACT_SHA256.get(model_version)
-    if expected_hash is None:
+    if model_version != MODEL_VERSION:
         raise ValueError("unsupported adaptive strategy model")
-    if artifact_hash != expected_hash:
+    if artifact_hash != MODEL_ARTIFACT_SHA256:
         raise ValueError(
             f"{model_version} artifact hash mismatch; calibration changes "
             "require a new model version"
@@ -268,11 +151,7 @@ def load_model_config(path: str | Path) -> ModelConfig:
                 ready=True,
                 reason="sealed_calibration_prior",
                 source="sealed-prior",
-                q95=(
-                    _decimal(source["q95"], "q95")
-                    if "q95" in source
-                    else None
-                ),
+                q95=_decimal(source["q95"], "q95"),
             )
         sides[side] = MappingProxyType(windows)
     formula = payload["formula"]
@@ -292,18 +171,10 @@ def load_model_config(path: str | Path) -> ModelConfig:
         weight_5m=_decimal(formula["weight5m"], "weight5m"),
         weight_30m=_decimal(formula["weight30m"], "weight30m"),
         weight_1h=_decimal(formula["weight1h"], "weight1h"),
-        exit_quantile=int(formula.get("exitQuantile", 50)),
-        entry_median_margin_bps=_decimal(
-            formula.get("entryMedianMarginBps", "0"),
-            "entryMedianMarginBps",
-        ),
-        entry_mad_multiplier_30m=_decimal(
-            formula.get("entryMadMultiplier30m", "0"),
-            "entryMadMultiplier30m",
-        ),
-        entry_quantile_pct=int(formula.get("entryQuantilePct", 50)),
+        exit_quantile=int(formula["exitQuantile"]),
+        entry_quantile_pct=int(formula["entryQuantilePct"]),
         opportunity_merge_seconds=int(formula["opportunityMergeSeconds"]),
         balance_ratio_limit=_decimal(formula["balanceRatioLimit"], "balanceRatioLimit"),
-        balance_minimum_events=int(formula.get("balanceMinimumEvents", 0)),
+        balance_minimum_events=int(formula["balanceMinimumEvents"]),
         epsilon=_decimal(formula["epsilon"], "epsilon"),
     )

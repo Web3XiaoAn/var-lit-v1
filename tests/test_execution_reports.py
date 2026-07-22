@@ -38,36 +38,31 @@ class ExecutionReportTests(unittest.TestCase):
             loss_usd=bps_to_usd(Decimal(bps), amount),
         )
 
-    def test_report_round_trip_is_model_asset_and_notional_scoped(self) -> None:
+    def test_report_round_trip_is_asset_and_notional_scoped(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "execution_samples.json"
             write_execution_samples(
                 path,
-                "adaptive-median-v1",
                 [self.sample(), self.sample(asset="ETH"), self.sample(notional="500")],
             )
             rows = read_execution_samples(
                 path,
-                "adaptive-median-v1",
                 "BTC",
                 notional_usd=Decimal("200"),
             )
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0].notional_usd, Decimal("200"))
-            self.assertEqual(
-                read_execution_samples(path, "another-model", "BTC"),
-                [],
-            )
+            self.assertEqual(len(read_execution_samples(path, "ETH")), 1)
 
     def test_old_or_corrupt_formats_are_not_loaded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "execution_samples.json"
             for payload in (
                 {"version": 2, "samples": []},
-                {"schema": "adaptive-execution-report-v1", "strategyVersion": "v", "samples": [{"bad": True}]},
+                {"schema": "adaptive-execution-report-v1", "samples": [{"bad": True}]},
             ):
                 path.write_text(json.dumps(payload), encoding="utf-8")
-                self.assertEqual(read_execution_samples(path, "v", "BTC"), [])
+                self.assertEqual(read_execution_samples(path, "BTC"), [])
 
     def test_signed_loss_and_bps_are_preserved_exactly(self) -> None:
         sample = self.sample(bps="-1.25")
@@ -88,10 +83,9 @@ class ExecutionReportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "execution_samples.json"
             samples = [self.sample(bps=str(index)) for index in range(105)]
-            write_execution_samples(path, "v5", samples)
+            write_execution_samples(path, samples)
             rows = read_execution_samples(
                 path,
-                "v5",
                 "BTC",
                 notional_usd=Decimal("200"),
             )
@@ -104,7 +98,6 @@ class ExecutionReportTests(unittest.TestCase):
             path = Path(directory) / "execution_samples.json"
             write_execution_samples(
                 path,
-                "v5",
                 [
                     self.sample(bps="1"),
                     self.sample(phase="close", side="SELL", bps="2"),
@@ -112,15 +105,10 @@ class ExecutionReportTests(unittest.TestCase):
                     self.sample(notional="500", bps="4"),
                 ],
             )
-            write_execution_samples(
-                path,
-                "v5",
-                "BTC",
-                [self.sample(bps="9")],
-            )
+            write_execution_samples(path, "BTC", [self.sample(bps="9")])
 
-            btc = read_execution_samples(path, "v5", "BTC")
-            eth = read_execution_samples(path, "v5", "ETH")
+            btc = read_execution_samples(path, "BTC")
+            eth = read_execution_samples(path, "ETH")
             self.assertEqual(len(btc), 3)
             self.assertEqual(len(eth), 1)
             self.assertEqual(

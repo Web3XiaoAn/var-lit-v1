@@ -34,7 +34,7 @@ class ExecutionReserveRuntimeTests(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "execution_samples.json"
-            write_execution_samples(path, main_module.EXECUTION_SAMPLE_VERSION, rows)
+            write_execution_samples(path, rows)
             with patch("main.EXECUTION_SAMPLES_FILE", path):
                 runtime.strategy_config.order_notional_usd = Decimal("200")
                 asyncio.run(runtime.load_execution_samples_for_asset("BTC"))
@@ -216,7 +216,7 @@ class ExecutionReserveRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime._execution_samples_revision, 1)
         self.assertEqual(dict(runtime.execution_loss_samples), {})
 
-    def test_hour1_survival_margin_uses_range_and_adverse_book_pressure(self) -> None:
+    def test_execution_survival_margin_inverts_calibrated_range_model(self) -> None:
         from tests.test_dashboard_calculations import make_open_candidate
 
         runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
@@ -246,8 +246,8 @@ class ExecutionReserveRuntimeTests(unittest.TestCase):
                 candidate.order_notional_usd,
             )
 
-        self.assertGreater(headroom, Decimal("0.12"))
-        self.assertLess(headroom, Decimal("0.13"))
+        self.assertGreater(headroom, Decimal("1.03"))
+        self.assertLess(headroom, Decimal("1.04"))
 
 
 if __name__ == "__main__":

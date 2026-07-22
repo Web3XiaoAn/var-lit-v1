@@ -50,8 +50,11 @@ class DemoRuntime:
             (10, "long_var", "+0.006000", "+0.008200"),
         ]
         rows: list[dict[str, Any]] = []
+        base_closed_at_ms = 1_774_300_000_000
         for number, direction_key, open_wear, close_wear in values:
             round_wear = float(open_wear) + float(close_wear)
+            held_seconds = 300 + number * 137
+            closed_at_ms = base_closed_at_ms + number * 3_600_000
             rows.append(
                 {
                     "number": number,
@@ -64,6 +67,9 @@ class DemoRuntime:
                     "openWear": open_wear,
                     "closeWear": close_wear,
                     "roundWear": f"{round_wear:.6f}",
+                    "openedAtMs": closed_at_ms - held_seconds * 1000,
+                    "closedAtMs": closed_at_ms,
+                    "heldSeconds": held_seconds,
                     "withinLimit": round_wear >= -0.02,
                 }
             )
@@ -75,6 +81,7 @@ class DemoRuntime:
         total_close = sum(float(row["closeWear"]) for row in self.rounds)
         total = total_open + total_close
         positive = sum(float(row["roundWear"]) >= 0 for row in self.rounds)
+        batch_holding_seconds = sum(row["heldSeconds"] for row in self.rounds)
         matched = abs(float(self.positions["var"]) + float(self.positions["lighter"])) < 1e-9
         has_position = abs(float(self.positions["var"])) > 1e-9
         return {
@@ -105,6 +112,7 @@ class DemoRuntime:
                 "reconcile": "正常" if matched else "仓位不一致",
                 "direction": "多 Var / 空 Lighter" if has_position else None,
                 "heldSeconds": 1122 if has_position else None,
+                "idleSeconds": None if has_position else 42,
             },
             "strategy": {
                 "mode": self.config["executionMode"],
@@ -126,6 +134,15 @@ class DemoRuntime:
                 "totalCloseWear": f"{total_close:.6f}",
                 "totalWear": f"{total:.6f}",
                 "averageWear": f"{total / len(self.rounds):.6f}",
+                "batchHoldingSeconds": batch_holding_seconds,
+                "averageHoldingSeconds": batch_holding_seconds // len(self.rounds),
+                "todayHoldingSeconds": batch_holding_seconds + (1122 if has_position else 0),
+                "todayTradingVolumeUsd": "4218.72",
+                "todayWear": f"{total:.6f}",
+                "todayAverageWear": f"{total / len(self.rounds):.6f}",
+                "todayCompletedRounds": len(self.rounds),
+                "holdingDay": "2026-07-21",
+                "holdingTimezone": "Asia/Shanghai",
                 "positiveRounds": positive,
                 "negativeRounds": len(self.rounds) - positive,
                 "currentBasis": {
@@ -185,6 +202,14 @@ class DemoRuntime:
                 "facts": {**facts, "单边金额": f"{payload.get('orderNotionalUsd', '-')} U"},
             }
         if action in {"close_var_residual", "close_lighter_residual"}:
+            own_key = "var" if action == "close_var_residual" else "lighter"
+            own_name = "Var" if own_key == "var" else "Lighter"
+            if abs(float(self.positions[own_key])) <= 1e-9:
+                return {
+                    "allowed": False,
+                    "reason": f"{own_name} 当前没有残仓。",
+                    "facts": facts,
+                }
             other = "Lighter" if action == "close_var_residual" else "Var"
             other_key = "lighter" if other == "Lighter" else "var"
             if abs(float(self.positions[other_key])) > 1e-9:

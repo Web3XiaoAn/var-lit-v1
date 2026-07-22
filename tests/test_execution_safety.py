@@ -7,7 +7,7 @@ from argparse import Namespace
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import main as main_module
 from main import OrderLifecycle, VariationalToLighterRuntime
@@ -268,6 +268,65 @@ class ExecutionSafetyTests(unittest.TestCase):
 
         asyncio.run(run_case())
 
+    def test_commit_confirmation_watchdog_refreshes_before_pausing(self) -> None:
+        async def run_case() -> None:
+            runtime = VariationalToLighterRuntime(
+                Namespace(auto_hedge=True, lang="zh")
+            )
+            intent = main_module.VarOrderIntent(
+                phase="close",
+                side="BUY",
+                amount=Decimal("500"),
+                sent_monotonic=time.monotonic() - 5,
+                market="BTC",
+                state=main_module.VAR_INTENT_COMMITTING,
+                sent_at_iso=main_module.utc_now(),
+                commit_accepted_monotonic=time.monotonic() - 4,
+            )
+            runtime.pending_var_intent = intent
+
+            async def stop_after_first_tick(_delay: float) -> None:
+                runtime.stop_flag = True
+
+            with patch.object(
+                main_module.asyncio,
+                "sleep",
+                AsyncMock(side_effect=stop_after_first_tick),
+            ), patch.object(
+                runtime,
+                "inspect_pending_var_intent_from_portfolio",
+                AsyncMock(
+                    side_effect=[
+                        main_module.VarPortfolioRecoveryOutcome.UNKNOWN,
+                        main_module.VarPortfolioRecoveryOutcome.UNKNOWN,
+                        main_module.VarPortfolioRecoveryOutcome.FILLED,
+                    ]
+                ),
+            ), patch.object(
+                runtime,
+                "refresh_pending_lighter_orders",
+                AsyncMock(),
+            ), patch.object(
+                runtime,
+                "refresh_variational_page_when_safe",
+                AsyncMock(),
+            ) as refresh, patch.object(
+                runtime,
+                "wait_for_authoritative_portfolio_after",
+                AsyncMock(return_value=True),
+            ) as wait, patch.object(
+                runtime,
+                "append_order_log",
+                AsyncMock(),
+            ):
+                await runtime.var_intent_watchdog_loop()
+
+            refresh.assert_awaited_once()
+            wait.assert_awaited_once()
+            self.assertFalse(runtime.automation_paused)
+
+        asyncio.run(run_case())
+
     def test_lighter_reconciliation_paginates_until_target_is_found(self) -> None:
         async def run_case() -> None:
             class PaginatedOrderApi:
@@ -469,7 +528,12 @@ class ExecutionSafetyTests(unittest.TestCase):
                     super().__init__(Namespace(auto_hedge=True, lang="zh"))
                     self.logged_events: list[str] = []
 
-                async def reconcile_accounts(self, *, allow_resume: bool = False) -> bool:
+                async def reconcile_accounts(
+                    self,
+                    *,
+                    allow_resume: bool = False,
+                    after_page_refresh: bool = False,
+                ) -> bool:
                     self.last_account_snapshot = main_module.AccountSnapshot(
                         var_position=Decimal("0"),
                         lighter_position=Decimal("0"),

@@ -278,16 +278,16 @@ class OperationsDashboardServer:
         if not confirmation_id:
             raise web.HTTPBadRequest(text="confirmationId is required")
         self._prune_confirmations()
-        completed = self._completed.get(confirmation_id)
-        if completed is not None:
-            return web.json_response(completed.response)
-        prepared = self._prepared.pop(confirmation_id, None)
-        if prepared is None:
-            return web.json_response(
-                {"ok": False, "error": "确认已过期，请重新检查当前状态"},
-                status=409,
-            )
         async with self._action_lock:
+            completed = self._completed.get(confirmation_id)
+            if completed is not None:
+                return web.json_response(completed.response)
+            prepared = self._prepared.pop(confirmation_id, None)
+            if prepared is None:
+                return web.json_response(
+                    {"ok": False, "error": "确认已过期，请重新检查当前状态"},
+                    status=409,
+                )
             try:
                 result = await self.action_executor(
                     prepared.action,
@@ -296,10 +296,10 @@ class OperationsDashboardServer:
                 )
             except Exception as exc:
                 result = {"ok": False, "error": str(exc)}
-        response = dict(result)
-        response.setdefault("ok", False)
-        self._completed[confirmation_id] = CompletedAction(
-            response=response,
-            expires_monotonic=time.monotonic() + 60,
-        )
+            response = dict(result)
+            response.setdefault("ok", False)
+            self._completed[confirmation_id] = CompletedAction(
+                response=response,
+                expires_monotonic=time.monotonic() + 60,
+            )
         return web.json_response(response, status=200 if response["ok"] else 409)

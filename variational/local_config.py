@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -24,7 +25,9 @@ def resolve_configured_path(
     root = project_root.expanduser().resolve()
     selected = explicit
     if selected is None:
-        source = dotenv_path or root / ".env"
+        source = dotenv_path or Path(
+            os.environ.get("VARIATIONAL_ENV_FILE", root / ".env")
+        )
         if not source.is_file():
             raise RuntimeError(
                 f"Required local configuration is missing: {source}. "

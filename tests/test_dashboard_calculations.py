@@ -90,10 +90,8 @@ def make_open_candidate(runtime: VariationalToLighterRuntime, *, now_ms: int | N
         max_normal_round_wear_bps=runtime.strategy_config.max_normal_round_wear_bps,
     )
     clock = SourceClock(captured_at_ms, captured_at_ms, 0)
-    buy_rate = epoch.thresholds.buy.final + (
-        Decimal("2") * epoch.thresholds.buy.mad_30m
-        if epoch.model_version in {"adaptive-median-v5", "adaptive-median-v6"}
-        else Decimal("0.001")
+    buy_rate = (
+        epoch.thresholds.buy.final + Decimal("2") * epoch.thresholds.buy.mad_30m
     )
     sell_rate = epoch.thresholds.sell.final - Decimal("0.001")
     frame = MarketFrame(
@@ -312,6 +310,8 @@ class DashboardCalculationTests(unittest.TestCase):
             )
             source.variational_ticker = "BTC"
             source.ticker = "BTC"
+            opened_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            closed_at = datetime.now(timezone.utc)
             opened = OrderLifecycle(
                 trade_key="persisted-open",
                 trade_id="persisted-open",
@@ -321,7 +321,7 @@ class DashboardCalculationTests(unittest.TestCase):
                 auto_hedge_enabled=True,
                 last_variational_status="filled",
                 var_fill_price=Decimal("100"),
-                var_fill_ts_iso="2026-01-01T00:00:00+00:00",
+                var_fill_ts_iso=opened_at.isoformat(),
                 firm_guard_pnl=Decimal("-0.20"),
             )
             closed = OrderLifecycle(
@@ -333,7 +333,7 @@ class DashboardCalculationTests(unittest.TestCase):
                 auto_hedge_enabled=True,
                 last_variational_status="filled",
                 var_fill_price=Decimal("100.05"),
-                var_fill_ts_iso="2026-01-01T00:00:01+00:00",
+                var_fill_ts_iso=closed_at.isoformat(),
             )
             source.records = {
                 opened.trade_key: opened,
@@ -357,9 +357,88 @@ class DashboardCalculationTests(unittest.TestCase):
             self.assertEqual(row["openWear"], "-0.20")
             self.assertEqual(row["closeWear"], "0.15")
             self.assertEqual(row["roundWear"], "-0.05")
+            self.assertEqual(row["heldSeconds"], 1)
+            self.assertEqual(row["closedAtMs"] - row["openedAtMs"], 1_000)
             self.assertTrue(row["recovery"])
+            self.assertEqual(len(restored._dashboard_holding_ledger), 1)
 
         asyncio.run(run_case())
+
+    def test_beijing_holding_overlap_splits_at_midnight(self) -> None:
+        opened = int(
+            datetime(2026, 7, 21, 15, 59, 30, tzinfo=timezone.utc).timestamp()
+            * 1_000
+        )
+        closed = int(
+            datetime(2026, 7, 21, 16, 0, 30, tzinfo=timezone.utc).timestamp()
+            * 1_000
+        )
+        label, start, end = main_module.beijing_day_bounds_ms(
+            datetime(2026, 7, 21, 15, 59, 45, tzinfo=timezone.utc)
+        )
+        self.assertEqual(label, "2026-07-21")
+        self.assertEqual(
+            main_module.interval_overlap_ms(opened, closed, start, end),
+            30_000,
+        )
+
+    def test_dashboard_holding_uses_actual_var_fills_for_manual_and_recovery(self) -> None:
+        for strategy_tag, close_phase in (
+            ("manual", "close"),
+            (main_module.ADAPTIVE_MODEL_VERSION, "emergency_close"),
+        ):
+            opened = make_record(f"{strategy_tag}-open", "buy", "1", "100", "101")
+            closed = make_record(f"{strategy_tag}-close", "sell", "1", "100", "101")
+            opened.strategy_tag = strategy_tag
+            opened.var_fill_ts_iso = "2026-07-21T00:00:00+00:00"
+            closed.strategy_phase = close_phase
+            closed.var_fill_ts_iso = "2026-07-21T00:02:03.999000+00:00"
+            _current, rounds = build_trade_rounds([opened, closed])
+
+            row = VariationalToLighterRuntime._dashboard_round_row(rounds[0])
+
+            self.assertEqual(row["heldSeconds"], 123)
+            self.assertEqual(row["closedAtMs"] - row["openedAtMs"], 123_999)
+
+    def test_dashboard_holding_does_not_guess_missing_timestamp(self) -> None:
+        opened = make_record("missing-open", "buy", "1", "100", "101")
+        closed = make_record("missing-close", "sell", "1", "100", "101")
+        opened.var_fill_ts_iso = "2026-07-21T00:00:00+00:00"
+        _current, rounds = build_trade_rounds([opened, closed])
+
+        row = VariationalToLighterRuntime._dashboard_round_row(rounds[0])
+
+        self.assertIsNone(row["closedAtMs"])
+        self.assertIsNone(row["heldSeconds"])
+
+    def test_dashboard_round_and_holding_ledger_deduplicate_same_round(self) -> None:
+        runtime = VariationalToLighterRuntime(Namespace(auto_hedge=True, lang="zh"))
+        runtime.variational_ticker = "BTC"
+        open_record = make_record("duplicate-open", "buy", "1", "100", "101")
+        close_record = make_record("duplicate-close", "sell", "1", "100", "101")
+        open_record.var_fill_ts_iso = "2026-07-21T00:00:00+00:00"
+        close_record.var_fill_ts_iso = "2026-07-21T00:01:00+00:00"
+        _current, rounds = build_trade_rounds([open_record, close_record])
+
+        runtime._merge_dashboard_rounds_locked(rounds)
+        runtime._merge_dashboard_rounds_locked(rounds)
+
+        self.assertEqual(len(runtime._dashboard_round_batch), 1)
+        self.assertEqual(len(runtime._dashboard_holding_ledger), 1)
+        label, day_start, day_end = main_module.beijing_day_bounds_ms(
+            datetime(2026, 7, 21, 8, 0, 15, tzinfo=timezone.utc)
+        )
+        self.assertEqual(label, "2026-07-21")
+        row = runtime._dashboard_round_batch[0]
+        self.assertEqual(
+            main_module.interval_overlap_ms(
+                row["openedAtMs"],
+                row["closedAtMs"],
+                day_start,
+                day_end,
+            ),
+            60_000,
+        )
 
     def test_mismatched_partial_close_is_not_reinterpreted_as_reverse_open(self) -> None:
         open_record = make_record("open", "buy", "0.005", "1000", "1001")
@@ -1526,7 +1605,7 @@ class DashboardCalculationTests(unittest.TestCase):
         self.assertIn("Var 开仓价", text)
         self.assertIn("Lighter 开仓价", text)
         self.assertIn("开仓收益", text)
-        self.assertIn("此时平仓磨损", text)
+        self.assertIn("当前整轮净估值", text)
 
     def test_dashboard_round_estimate_is_net_of_visible_close_reserve(self) -> None:
         async def render_text() -> str:
@@ -2517,6 +2596,7 @@ class DashboardCalculationTests(unittest.TestCase):
                     "firmQty": "2",
                     "guardPnl": "0.80",
                     "guardMinPnl": "0.40",
+                    "hedgeMinPnl": "0.30",
                     "executionReserveUsd": "0.02",
                     "lighterVwap": "100.10",
                     "lighterQuoteAgeMs": 12,
@@ -2529,6 +2609,7 @@ class DashboardCalculationTests(unittest.TestCase):
             self.assertEqual(prepared.state, "PREPARED")
             self.assertEqual(prepared.trace_id, "trace-prepared-intent")
             self.assertIsNotNone(prepared.lighter_client_order_index)
+            self.assertEqual(prepared.firm_required_pnl, Decimal("0.30"))
             self.assertGreater(prepared.lighter_client_order_index, 0)
             self.assertLess(prepared.lighter_client_order_index, 1 << 48)
 
@@ -3808,7 +3889,9 @@ class DashboardCalculationTests(unittest.TestCase):
             assert runtime._reconcile_mismatch_first_monotonic is not None
             runtime._reconcile_mismatch_first_monotonic -= 5.1
             mark_fresh_variational_portfolio(runtime, qty=positions["var"])
-            self.assertFalse(await runtime.reconcile_accounts())
+            self.assertFalse(
+                await runtime.reconcile_accounts(after_page_refresh=True)
+            )
             self.assertTrue(runtime.automation_paused)
 
             positions.update(var=Decimal("0"), lighter=Decimal("0"))
@@ -3845,7 +3928,12 @@ class DashboardCalculationTests(unittest.TestCase):
                     super().__init__(Namespace(auto_hedge=True, lang="zh"))
                     self.calls = 0
 
-                async def reconcile_accounts(self, *, allow_resume: bool = False) -> bool:
+                async def reconcile_accounts(
+                    self,
+                    *,
+                    allow_resume: bool = False,
+                    after_page_refresh: bool = False,
+                ) -> bool:
                     self.calls += 1
                     if self.calls <= 2:
                         raise RuntimeError("temporary account API failure")
@@ -4416,7 +4504,7 @@ class DashboardCalculationTests(unittest.TestCase):
                 Decimal(guarded["adaptiveStrategy"]["firmCloseRate"]),
                 Decimal("-0.001"),
             )
-            self.assertEqual(guarded["executionReserveUsd"], "0.010510")
+            self.assertEqual(guarded["executionReserveUsd"], "0.01051")
 
         asyncio.run(run_case())
 
@@ -4491,7 +4579,7 @@ class DashboardCalculationTests(unittest.TestCase):
 
         asyncio.run(run_case())
 
-    def test_zero_wear_stability_firm_guard_requires_fresh_gross_pnl_non_negative(self) -> None:
+    def test_zero_wear_stability_firm_guard_requires_latency_reserve(self) -> None:
         async def run_case() -> None:
             class FakeBroker:
                 def __init__(self) -> None:
@@ -4565,12 +4653,11 @@ class DashboardCalculationTests(unittest.TestCase):
                 close_candidate=close_candidate,
             )
 
-            self.assertTrue(result["ok"])
-            guarded = runtime.runtime.command_broker.calls[1]["firm_quote"]
-            self.assertEqual(guarded["guardPnl"], "-0.0050")
-            self.assertEqual(guarded["guardMinPnl"], "-0.01000000")
-            self.assertTrue(
-                guarded["adaptiveStrategy"]["zeroWearStabilityPassed"]
+            self.assertFalse(result["ok"])
+            self.assertIn("fresh firm quote rejected", result["error"])
+            self.assertEqual(
+                [call["fetch_stage"] for call in runtime.runtime.command_broker.calls],
+                ["quote"],
             )
 
         asyncio.run(run_case())

@@ -1,4 +1,4 @@
-"""Immutable domain objects for the versioned adaptive-median strategies."""
+"""Immutable domain objects for adaptive-median-v6."""
 
 from __future__ import annotations
 
@@ -163,9 +163,6 @@ class WindowStats:
     ready: bool
     reason: str
     source: str = "live"
-    # Added in adaptive-median-v2.  Keeping this optional lets the runtime
-    # deserialize/reconcile frozen v1 evidence without pretending that its
-    # historical Q80 was a Q95 observation.
     q95: Decimal | None = None
 
     def __post_init__(self) -> None:
@@ -201,8 +198,6 @@ class ThresholdComponents:
     # Favorable rate used only to project a later exit opportunity.  Actual
     # closes remain governed by exact fill economics and the frozen wear floor.
     exit_opportunity: Decimal | None = None
-    # V3's entry gate.  V1/V2 default to their weighted Q80 so old frozen
-    # contexts remain fully readable without inventing a new field.
     entry_opportunity: Decimal | None = None
 
     def __post_init__(self) -> None:
@@ -226,10 +221,8 @@ class ThresholdComponents:
             object.__setattr__(self, "entry_opportunity", self.q80)
         else:
             require_decimal("entry_opportunity", self.entry_opportunity)
-        # V1/V2 candidates use max(q80, economic, balance).  V3 uses its
-        # three-window entry opportunity and keeps the economic value as a
-        # visible diagnostic.  Activated thresholds may temporarily lag a
-        # candidate because parameter changes require confirmation.
+        # Activated thresholds may temporarily lag a candidate because
+        # parameter changes require confirmation.
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,15 +312,7 @@ class PositionContext:
     epoch: ParameterEpoch | None
 
     def __post_init__(self) -> None:
-        if self.strategy_tag not in {
-            "adaptive-median-v1",
-            "adaptive-median-v2",
-            "adaptive-median-v3",
-            "adaptive-median-v4",
-            "adaptive-median-v5",
-            "adaptive-median-v6",
-            "manual",
-        }:
+        if self.strategy_tag not in {"adaptive-median-v6", "manual"}:
             raise ValueError("unsupported strategy_tag")
         require_timestamp("opened_at_ms", self.opened_at_ms)
         require_positive("actual_base_qty", self.actual_base_qty)

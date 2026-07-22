@@ -29,12 +29,8 @@ from variational.local_config import resolve_configured_path  # noqa: E402
 
 JSONL_STREAM_NAMES = {
     "strategy-market-samples.jsonl": "strategy_market_sample",
-    "adaptive-median-v1-calibration.jsonl": "strategy_market_sample",
     "order-metrics.jsonl": "order_metric",
-    "pre-unified-order-metrics.jsonl": "order_metric",
     "execution-trace.jsonl": "execution_trace",
-    "pre-unified-execution-trace.jsonl": "execution_trace",
-    "execution-trace-pre-v4-live1.jsonl.gz": "execution_trace",
     "executions.jsonl": "normalized_execution",
     "rounds.jsonl": "normalized_round",
     "sessions.jsonl": "runtime_session",

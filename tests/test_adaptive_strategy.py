@@ -10,6 +10,8 @@ from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from adaptive_strategy import (
     Action,
     DirectionalRates,
@@ -27,20 +29,21 @@ from adaptive_strategy import (
     compile_exit_opportunity,
     compile_q80,
     load_model_config,
+    long_hold_floor_adjustment_usd,
     opportunity_balance_threshold,
 )
 from adaptive_strategy.parameters import opportunity_events
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODEL_PATH = ROOT / "adaptive_strategy" / "models" / "adaptive-median-v1.json"
-MODEL_V2_PATH = ROOT / "adaptive_strategy" / "models" / "adaptive-median-v2.json"
-MODEL_V3_PATH = ROOT / "adaptive_strategy" / "models" / "adaptive-median-v3.json"
-MODEL_V4_PATH = ROOT / "adaptive_strategy" / "models" / "adaptive-median-v4.json"
-MODEL_V5_PATH = ROOT / "adaptive_strategy" / "models" / "adaptive-median-v5.json"
-MODEL_V6_PATH = ROOT / "adaptive_strategy" / "models" / "adaptive-median-v6.json"
+MODEL_PATH = ROOT / "adaptive_strategy" / "models" / "adaptive-median-v6.json"
 D = Decimal
 MODEL = load_model_config(MODEL_PATH)
+
+
+@pytest.fixture
+def model():
+    return MODEL
 
 
 def strategy_engine(**overrides) -> StrategyEngine:
@@ -120,98 +123,9 @@ def test_model_artifact_matches_sealed_dataset(model):
     assert model.asset == "BTC"
 
 
-def test_v2_short_window_weight_and_q95_exit_projection_are_sealed():
-    model = load_model_config(MODEL_V2_PATH)
-    assert (model.weight_5m, model.weight_30m, model.weight_1h) == (
-        D("0.25"),
-        D("0.45"),
-        D("0.30"),
-    )
-    assert model.exit_quantile == 95
-    projected = compile_exit_opportunity(model.calibration_stats[Side.BUY], model)
-    assert projected > compile_q80(model.calibration_stats[Side.BUY], model)
-    assert model.reference_notional_usd == D("500")
-    assert model.coverage_hours >= D("4")
-
-
-def test_v3_three_window_entry_gate_and_margin_are_sealed():
-    model = load_model_config(MODEL_V3_PATH)
-    assert model.entry_median_margin_bps == D("0.50")
-    assert model.entry_mad_multiplier_30m == D("0.25")
-    for side in Side:
-        stats = model.calibration_stats[side]
-        expected = max(
-            stats[5].median,
-            stats[30].median,
-            stats[60].median,
-        ) + max(D("0.00005"), D("0.25") * stats[30].mad)
-        assert compile_entry_opportunity(stats, model) == expected
-
-        epoch = candidate(model)
-        component = epoch.component(side)
-        assert component.entry_opportunity == expected
-        assert component.final >= expected
-    # The cost projection remains visible, but it no longer silently replaces
-    # the user's explicit three-window market-opportunity definition.
-    buy = candidate(model).thresholds.buy
-    assert buy.economic > buy.entry_opportunity
-    assert buy.final == buy.entry_opportunity
-
-
-def test_v4_uses_small_three_window_margin_and_keeps_balance_diagnostic():
-    model = load_model_config(MODEL_V4_PATH)
-    assert model.entry_median_margin_bps == D("0.10")
-    assert model.entry_mad_multiplier_30m == D("0")
-    assert model.balance_ratio_limit == D("2")
-    assert model.balance_minimum_events == 8
-    for side in Side:
-        stats = model.calibration_stats[side]
-        expected = max(
-            stats[5].median,
-            stats[30].median,
-            stats[60].median,
-        ) + D("0.00001")
-        assert compile_entry_opportunity(stats, model) == expected
-        epoch = candidate(
-            model,
-            balance={
-                Side.BUY: expected + D("0.01"),
-                Side.SELL: expected + D("0.01"),
-            },
-        )
-        component = epoch.component(side)
-        assert component.entry_opportunity == expected
-        assert component.final == expected
-
-
-def test_v5_uses_adaptive_mad_cushion_and_keeps_balance_diagnostic():
-    model = load_model_config(MODEL_V5_PATH)
-    assert model.entry_median_margin_bps == D("0.05")
-    assert model.entry_mad_multiplier_30m == D("0.20")
-    for side in Side:
-        stats = model.calibration_stats[side]
-        expected = max(
-            stats[5].median,
-            stats[30].median,
-            stats[60].median,
-        ) + max(D("0.000005"), D("0.20") * stats[30].mad)
-        assert compile_entry_opportunity(stats, model) == expected
-        epoch = candidate(
-            model,
-            balance={
-                Side.BUY: expected + D("0.01"),
-                Side.SELL: expected + D("0.01"),
-            },
-        )
-        assert epoch.epoch_id.startswith("ame5-")
-        assert epoch.component(side).final == expected
-
-
-def test_v6_uses_weighted_empirical_entry_quantile():
-    model = load_model_config(MODEL_V6_PATH)
+def test_current_model_uses_weighted_empirical_entry_quantile():
+    model = load_model_config(MODEL_PATH)
     assert model.entry_quantile_pct == 58
-    assert model.entry_median_margin_bps == D("0")
-    assert model.entry_mad_multiplier_30m == D("0")
     fraction = D("8") / D("30")
     for side in Side:
         stats = model.calibration_stats[side]
@@ -231,8 +145,8 @@ def test_v6_uses_weighted_empirical_entry_quantile():
         assert epoch.component(side).final == expected
 
 
-def test_v5_rejects_reference_spikes_above_three_mad_at_both_open_checks():
-    model = load_model_config(MODEL_V5_PATH)
+def test_current_model_rejects_reference_spikes_above_three_mad_at_both_open_checks():
+    model = load_model_config(MODEL_PATH)
     epoch = candidate(model, now_ms=10_000)
     engine = strategy_engine()
     buy = epoch.thresholds.buy
@@ -284,8 +198,8 @@ def test_v5_rejects_reference_spikes_above_three_mad_at_both_open_checks():
     assert blocked.reason == "firm_reference_rate_above_spike_band"
 
 
-def test_v4_sell_hard_limit_blocks_only_below_negative_point_zero_seventy_three_percent():
-    model = load_model_config(MODEL_V4_PATH)
+def test_sell_hard_limit_blocks_only_below_negative_point_zero_seventy_three_percent():
+    model = load_model_config(MODEL_PATH)
     epoch = candidate(model, now_ms=10_000)
     engine = strategy_engine()
 
@@ -299,8 +213,8 @@ def test_v4_sell_hard_limit_blocks_only_below_negative_point_zero_seventy_three_
     sell_only_market = frame(
         at_ms=10_100,
         reference_buy=epoch.thresholds.buy.final - D("0.001"),
-        reference_sell=D("0"),
-        actual_sell=D("0"),
+        reference_sell=D("-0.0007"),
+        actual_sell=D("-0.0007"),
     )
     blocked = engine.evaluate_open(
         frame=sell_only_market,
@@ -327,15 +241,15 @@ def test_v4_sell_hard_limit_blocks_only_below_negative_point_zero_seventy_three_
     assert allowed.open_candidate.direction is Side.SELL
 
 
-def test_v4_buy_hard_limit_requires_strictly_above_positive_point_zero_five_percent():
-    model = load_model_config(MODEL_V4_PATH)
+def test_buy_hard_limit_requires_strictly_above_positive_point_zero_five_percent():
+    model = load_model_config(MODEL_PATH)
     epoch = candidate(model, now_ms=10_000)
     engine = strategy_engine()
     buy_only_market = frame(
         at_ms=10_100,
-        reference_buy=D("1"),
+        reference_buy=D("0.00055"),
         reference_sell=epoch.thresholds.sell.final - D("0.001"),
-        actual_buy=D("1"),
+        actual_buy=D("0.00055"),
     )
 
     at_limit_epoch = replace(
@@ -372,8 +286,8 @@ def test_v4_buy_hard_limit_requires_strictly_above_positive_point_zero_five_perc
     assert allowed.open_candidate.direction is Side.BUY
 
 
-def test_v4_sell_hard_limit_leaves_buy_direction_unchanged():
-    model = load_model_config(MODEL_V4_PATH)
+def test_sell_hard_limit_leaves_buy_direction_unchanged():
+    model = load_model_config(MODEL_PATH)
     epoch = candidate(model, now_ms=10_000)
     below_limit_epoch = replace(
         epoch,
@@ -384,10 +298,14 @@ def test_v4_sell_hard_limit_leaves_buy_direction_unchanged():
     )
     market = frame(
         at_ms=10_100,
-        reference_buy=epoch.thresholds.buy.final + D("0.0001"),
-        reference_sell=D("0"),
-        actual_buy=epoch.thresholds.buy.final + D("0.0001"),
-        actual_sell=D("0"),
+        reference_buy=(
+            epoch.thresholds.buy.final + D("2") * epoch.thresholds.buy.mad_30m
+        ),
+        reference_sell=D("-0.0007"),
+        actual_buy=(
+            epoch.thresholds.buy.final + D("2") * epoch.thresholds.buy.mad_30m
+        ),
+        actual_sell=D("-0.0007"),
     )
     decision = strategy_engine().evaluate_open(
         frame=market,
@@ -399,8 +317,8 @@ def test_v4_sell_hard_limit_leaves_buy_direction_unchanged():
     assert decision.open_candidate.direction is Side.BUY
 
 
-def test_v4_firm_guard_rejects_frozen_sell_candidate_below_hard_limit():
-    model = load_model_config(MODEL_V4_PATH)
+def test_firm_guard_rejects_frozen_sell_candidate_below_hard_limit():
+    model = load_model_config(MODEL_PATH)
     epoch = candidate(model, now_ms=10_000)
     engine = strategy_engine()
     at_limit_epoch = replace(
@@ -413,8 +331,8 @@ def test_v4_firm_guard_rejects_frozen_sell_candidate_below_hard_limit():
     market = frame(
         at_ms=10_100,
         reference_buy=epoch.thresholds.buy.final - D("0.001"),
-        reference_sell=D("0"),
-        actual_sell=D("0"),
+        reference_sell=D("-0.0007"),
+        actual_sell=D("-0.0007"),
     )
     open_candidate = engine.evaluate_open(
         frame=market,
@@ -445,8 +363,8 @@ def test_v4_firm_guard_rejects_frozen_sell_candidate_below_hard_limit():
     assert blocked.reason == "sell_dynamic_threshold_below_hard_limit"
 
 
-def test_v4_firm_guard_rejects_frozen_buy_candidate_at_hard_limit():
-    model = load_model_config(MODEL_V4_PATH)
+def test_firm_guard_rejects_frozen_buy_candidate_at_hard_limit():
+    model = load_model_config(MODEL_PATH)
     epoch = candidate(model, now_ms=10_000)
     engine = strategy_engine()
     above_limit_epoch = replace(
@@ -458,9 +376,9 @@ def test_v4_firm_guard_rejects_frozen_buy_candidate_at_hard_limit():
     )
     market = frame(
         at_ms=10_100,
-        reference_buy=D("1"),
+        reference_buy=D("0.00055"),
         reference_sell=epoch.thresholds.sell.final - D("0.001"),
-        actual_buy=D("1"),
+        actual_buy=D("0.00055"),
     )
     open_candidate = engine.evaluate_open(
         frame=market,
@@ -500,8 +418,8 @@ def test_dynamic_threshold_minimums_are_constructor_configurable():
     assert engine.sell_open_dynamic_threshold_minimum == D("-0.0008")
 
 
-def test_v3_firm_guard_rechecks_three_window_rate_without_economic_veto():
-    model = load_model_config(MODEL_V3_PATH)
+def test_firm_guard_rechecks_three_window_rate_without_economic_veto():
+    model = load_model_config(MODEL_PATH)
     epoch = candidate(model, now_ms=10_000)
     engine = strategy_engine()
     threshold = epoch.thresholds.buy.final
@@ -531,8 +449,8 @@ def test_v3_firm_guard_rechecks_three_window_rate_without_economic_veto():
     assert confirmed.open_candidate.actual_rate == threshold
 
 
-def test_v3_confirmed_epoch_never_smooths_below_three_window_gate():
-    model = load_model_config(MODEL_V3_PATH)
+def test_confirmed_epoch_never_smooths_below_three_window_gate():
+    model = load_model_config(MODEL_PATH)
     activator = EpochActivator(model=model)
     first = activator.offer(candidate(model, now_ms=10_000), now_ms=10_000)
     assert first is not None
@@ -572,18 +490,18 @@ def test_v3_confirmed_epoch_never_smooths_below_three_window_gate():
         )
 
 
-def test_v1_model_artifact_rejects_silent_calibration_edit():
+def test_model_artifact_rejects_silent_calibration_edit():
     payload = json.loads(MODEL_PATH.read_text(encoding="utf-8"))
     payload["calibration"]["BUY"]["5"]["median"] = "0.123"
     with tempfile.TemporaryDirectory(prefix="adaptive-model-") as tmp:
-        changed = Path(tmp) / "adaptive-median-v1.json"
+        changed = Path(tmp) / "adaptive-median-v6.json"
         changed.write_text(json.dumps(payload), encoding="utf-8")
         try:
             load_model_config(changed)
         except ValueError as exc:
             assert "artifact hash mismatch" in str(exc)
         else:
-            raise AssertionError("silently modified v1 model artifact was accepted")
+            raise AssertionError("silently modified model artifact was accepted")
 
 
 def test_parameter_candidate_rejects_non_hex_config_hash(model):
@@ -606,20 +524,20 @@ def test_parameter_candidate_rejects_non_hex_config_hash(model):
 
 def test_multi_window_formula_uses_exact_weights(model):
     assert compile_baseline(model.calibration_stats[Side.BUY], model) == D(
-        "0.0009453979366087396656916772003"
+        "0.0009444061134652761161527953339"
     )
     assert compile_baseline(model.calibration_stats[Side.SELL], model) == D(
-        "-0.001064144044561809131139125050"
+        "-0.001063738566568635951898541750"
     )
     assert compile_q80(model.calibration_stats[Side.BUY], model) == D(
-        "0.0009810959618758721945475370536"
+        "0.0009801681178871614842458950893"
     )
     assert compile_q80(model.calibration_stats[Side.SELL], model) == D(
-        "-0.001024309621138335851129621484"
+        "-0.001024483400318970865216035806"
     )
     assert (model.weight_5m, model.weight_30m, model.weight_1h) == (
-        D("0.15"),
-        D("0.55"),
+        D("0.25"),
+        D("0.45"),
         D("0.30"),
     )
 
@@ -636,18 +554,18 @@ def test_thirty_minute_weight_dominates_one_hour_and_five_minute(model):
         )
         deltas[minutes] = compile_baseline(changed, model) - baseline
 
-    assert abs(deltas[5] - D("0.00015")) < D("1e-27")
-    assert abs(deltas[30] - D("0.00055")) < D("1e-27")
+    assert abs(deltas[5] - D("0.00025")) < D("1e-27")
+    assert abs(deltas[30] - D("0.00045")) < D("1e-27")
     assert abs(deltas[60] - D("0.00030")) < D("1e-27")
     assert deltas[30] > deltas[60] > deltas[5]
 
 
 def test_economic_threshold_includes_both_legs_of_both_phases(model):
     epoch = candidate(model)
-    assert epoch.thresholds.buy.economic == D("0.001164144044561809131139125050")
-    assert epoch.thresholds.sell.economic == D("-0.000845397936608739665691677200")
-    assert epoch.thresholds.buy.final == epoch.thresholds.buy.economic
-    assert epoch.thresholds.sell.final == epoch.thresholds.sell.economic
+    assert epoch.thresholds.buy.economic == D("0.001091590112762087057951730210")
+    assert epoch.thresholds.sell.economic == D("-0.000908459839922497784352559577")
+    assert epoch.thresholds.buy.final == epoch.thresholds.buy.entry_opportunity
+    assert epoch.thresholds.sell.final == epoch.thresholds.sell.entry_opportunity
 
 
 def test_more_reserve_can_only_raise_thresholds(model):
@@ -655,11 +573,11 @@ def test_more_reserve_can_only_raise_thresholds(model):
     high = candidate(model, reserve=D("0.75"))
     for side in Side:
         assert high.component(side).economic > low.component(side).economic
-        assert high.component(side).final >= low.component(side).final
+        assert high.component(side).final == low.component(side).final
 
 
 def test_balance_only_raises_overactive_direction(model):
-    own = [OpportunitySample(index * 20_000, D("0.002") + D(index) / D("1000000")) for index in range(8)]
+    own = [OpportunitySample(index * 20_000, D("0.002") + D(index) / D("1000000")) for index in range(12)]
     other = [OpportunitySample(0, D("0.002")), OpportunitySample(20_000, D("0.0021"))]
     raised = opportunity_balance_threshold(
         own_samples=own,
@@ -695,8 +613,8 @@ def test_balance_only_raises_overactive_direction(model):
     )
 
 
-def test_v4_balance_never_suppresses_below_eight_independent_events():
-    model = load_model_config(MODEL_V4_PATH)
+def test_balance_never_suppresses_below_eight_independent_events():
+    model = load_model_config(MODEL_PATH)
     own = [
         OpportunitySample(index * 20_000, D("0.002") + D(index) / D("1000000"))
         for index in range(12)
@@ -729,11 +647,10 @@ def test_v4_balance_never_suppresses_below_eight_independent_events():
 
 def test_nonpassing_sample_breaks_opportunity_episode(model):
     samples = [
-        OpportunitySample(0, D("0.002")),
-        OpportunitySample(2_000, D("0")),
-        OpportunitySample(4_000, D("0.0021")),
-        OpportunitySample(30_000, D("0.0022")),
+        OpportunitySample(index * 20_000, D("0.002") + D(index) / D("1000000"))
+        for index in range(12)
     ]
+    samples.insert(1, OpportunitySample(2_000, D("0")))
     other = [OpportunitySample(0, D("0.002"))]
     raised = opportunity_balance_threshold(
         own_samples=samples,
@@ -792,7 +709,7 @@ def test_activated_epoch_id_identifies_post_confirmation_thresholds(model):
 
     assert conservative_active is not None
     assert unchanged_active is not None
-    assert conservative_active.thresholds.buy.final != unchanged_active.thresholds.buy.final
+    assert conservative_active.thresholds.buy.economic != unchanged_active.thresholds.buy.economic
     assert conservative_active.epoch_id != unchanged_active.epoch_id
 
 
@@ -912,12 +829,12 @@ def test_five_minute_window_is_complete_and_changes_formal_threshold(model):
     assert abs(
         changed.thresholds.buy.baseline
         - original.thresholds.buy.baseline
-        - D("0.00015")
+        - D("0.00025")
     ) < D("1e-27")
     assert abs(
         changed.thresholds.buy.q80
         - original.thresholds.buy.q80
-        - D("0.00015")
+        - D("0.00025")
     ) < D("1e-27")
     assert changed.epoch_id != original.epoch_id
 
@@ -1065,6 +982,13 @@ def test_frozen_window_copy_is_detached_from_live_store(model):
 
 def test_open_chooses_standardized_excess_then_lower_bound(model):
     epoch = candidate(model, now_ms=10_000)
+    epoch = replace(
+        epoch,
+        thresholds=replace(
+            epoch.thresholds,
+            sell=replace(epoch.thresholds.sell, final=D("-0.0007")),
+        ),
+    )
     engine = strategy_engine()
     buy_threshold = epoch.thresholds.buy.final
     sell_threshold = epoch.thresholds.sell.final
@@ -1085,9 +1009,13 @@ def test_independent_feed_update_cadence_is_not_a_trading_block(model):
     epoch = candidate(model, now_ms=10_000)
     market = frame(
         at_ms=10_100,
-        reference_buy=epoch.thresholds.buy.final + D("0.0001"),
+        reference_buy=(
+            epoch.thresholds.buy.final + D("2") * epoch.thresholds.buy.mad_30m
+        ),
         reference_sell=epoch.thresholds.sell.final - D("0.001"),
-        actual_buy=epoch.thresholds.buy.final + D("0.0002"),
+        actual_buy=(
+            epoch.thresholds.buy.final + D("2") * epoch.thresholds.buy.mad_30m
+        ),
     )
     decision = strategy_engine().evaluate_open(
         frame=replace(market, source_skew_ms=5_000),
@@ -1099,10 +1027,10 @@ def test_independent_feed_update_cadence_is_not_a_trading_block(model):
 
 def test_two_hundred_usd_economics_scale_every_monetary_term(model):
     epoch = candidate(model, now_ms=10_000)
-    actual_rate = epoch.thresholds.buy.final + D("0.0002")
+    actual_rate = epoch.thresholds.buy.final + D("2") * epoch.thresholds.buy.mad_30m
     market = frame(
         at_ms=10_100,
-        reference_buy=epoch.thresholds.buy.final + D("0.0001"),
+        reference_buy=actual_rate,
         reference_sell=epoch.thresholds.sell.final - D("0.001"),
         actual_buy=actual_rate,
         actual_notional=D("200"),
@@ -1117,7 +1045,7 @@ def test_two_hundred_usd_economics_scale_every_monetary_term(model):
     phase_reserve = D("200") * D("2") * D("0.50") / D("10000")
     expected = (
         D("200") * actual_rate
-        + D("200") * epoch.thresholds.sell.baseline
+        + D("200") * epoch.thresholds.sell.exit_opportunity
         - D("2") * phase_reserve
     )
     assert opened.order_notional_usd == D("200")
@@ -1130,9 +1058,13 @@ def test_inflight_firm_guard_uses_frozen_epoch_and_symmetric_one_usd_tolerance(m
     engine = strategy_engine()
     initial = frame(
         at_ms=10_100,
-        reference_buy=epoch.thresholds.buy.final + D("0.0001"),
+        reference_buy=(
+            epoch.thresholds.buy.final + D("2") * epoch.thresholds.buy.mad_30m
+        ),
         reference_sell=epoch.thresholds.sell.final - D("0.001"),
-        actual_buy=epoch.thresholds.buy.final + D("0.0002"),
+        actual_buy=(
+            epoch.thresholds.buy.final + D("2") * epoch.thresholds.buy.mad_30m
+        ),
     )
     candidate_open = engine.evaluate_open(frame=initial, epoch=epoch, now_ms=10_100).open_candidate
     assert candidate_open is not None
@@ -1199,9 +1131,13 @@ def test_firm_tolerance_is_relative_to_any_configured_target(model):
         epoch = candidate(model, now_ms=10_000, order_notional=target)
         initial = frame(
             at_ms=10_100,
-            reference_buy=epoch.thresholds.buy.final + D("0.0001"),
+            reference_buy=(
+                epoch.thresholds.buy.final + D("2") * epoch.thresholds.buy.mad_30m
+            ),
             reference_sell=epoch.thresholds.sell.final - D("0.001"),
-            actual_buy=epoch.thresholds.buy.final + D("0.0002"),
+            actual_buy=(
+                epoch.thresholds.buy.final + D("2") * epoch.thresholds.buy.mad_30m
+            ),
             actual_notional=target,
         )
         opened = engine.evaluate_open(
@@ -1243,9 +1179,13 @@ def test_captured_template_target_can_differ_from_sampling_notional(model):
     engine = strategy_engine()
     initial = frame(
         at_ms=10_100,
-        reference_buy=epoch.thresholds.buy.final + D("0.0001"),
+        reference_buy=(
+            epoch.thresholds.buy.final + D("2") * epoch.thresholds.buy.mad_30m
+        ),
         reference_sell=epoch.thresholds.sell.final - D("0.001"),
-        actual_buy=epoch.thresholds.buy.final + D("0.0002"),
+        actual_buy=(
+            epoch.thresholds.buy.final + D("2") * epoch.thresholds.buy.mad_30m
+        ),
         actual_notional=D("200"),
     )
     opened = engine.evaluate_open(
@@ -1275,8 +1215,14 @@ def test_close_floors(model):
     cases = [
         (1_000, D("0.05"), D("-0.0001"), Action.NO_ACTION, D("0")),
         (1_000, D("0"), D("-0.0001"), Action.NO_ACTION, D("0")),
+        (1_800, D("0"), D("0"), Action.CLOSE, D("-0.02")),
         (1_900, D("0"), D("0"), Action.CLOSE, D("-0.02")),
-        (7_300, D("0.05"), D("-0.0001"), Action.CLOSE, D("-0.02")),
+        (2_700, D("0.05"), D("-0.0001"), Action.CLOSE, D("-0.02")),
+        (3_599, D("0.05"), D("-0.0001"), Action.CLOSE, D("-0.02")),
+        (3_600, D("0.05"), D("-0.0001"), Action.CLOSE, D("-0.024")),
+        (4_199, D("0.05"), D("-0.0001"), Action.CLOSE, D("-0.024")),
+        (4_200, D("0.05"), D("-0.0001"), Action.CLOSE, D("-0.028")),
+        (7_300, D("0.05"), D("-0.0001"), Action.CLOSE, D("-0.048")),
     ]
     for held_seconds, open_pnl, close_rate, expected_action, floor in cases:
         epoch = candidate(model, now_ms=10_000)
@@ -1288,7 +1234,7 @@ def test_close_floors(model):
             actual_sell=close_rate,
         )
         position = PositionContext(
-            strategy_tag="adaptive-median-v1",
+            strategy_tag="adaptive-median-v6",
             open_direction=Side.BUY,
             opened_at_ms=now_ms - held_seconds * 1_000,
             actual_base_qty=D("2"),
@@ -1308,6 +1254,83 @@ def test_close_floors(model):
         assert decision.close_candidate is not None
         assert decision.close_candidate.required_floor_usd == floor
         assert decision.close_candidate.max_hold_alert is (held_seconds >= 7_200)
+
+
+def test_long_hold_floor_adjustment_uses_position_age_only():
+    assert long_hold_floor_adjustment_usd(0, D("500")) == D("0")
+    assert long_hold_floor_adjustment_usd(3_599, D("500")) == D("0")
+    assert long_hold_floor_adjustment_usd(3_600, D("500")) == D("0.01")
+    assert long_hold_floor_adjustment_usd(4_199, D("1000")) == D("0.02")
+    assert long_hold_floor_adjustment_usd(4_200, D("200")) == D("0.008")
+
+
+def test_long_hold_total_floor_scales_with_actual_open_notional(model):
+    epoch = candidate(model, now_ms=10_000)
+    now_ms = 20_000_000
+    market = replace(
+        frame(at_ms=now_ms, reference_buy=D("0"), reference_sell=D("0")),
+        var_bid=D("100"),
+        var_ask=D("100"),
+        lighter_actual_buy_vwap=D("100"),
+    )
+
+    for notional, expected_floor in (
+        (D("200"), D("-0.024")),
+        (D("500"), D("-0.060")),
+        (D("1000"), D("-0.120")),
+    ):
+        position = PositionContext(
+            strategy_tag="adaptive-median-v6",
+            open_direction=Side.BUY,
+            opened_at_ms=now_ms - 3_600_000,
+            actual_base_qty=D("2"),
+            actual_notional_usd=notional,
+            actual_open_pnl_usd=D("0"),
+            epoch=epoch,
+        )
+        decision = strategy_engine().evaluate_close(
+            frame=market,
+            position=position,
+            now_ms=now_ms,
+        )
+
+        assert decision.close_candidate is not None
+        assert decision.close_candidate.required_floor_usd == expected_floor
+
+
+def test_long_hold_floor_can_release_a_stale_position(model):
+    epoch = candidate(model, now_ms=10_000)
+    now_ms = 20_000_000
+    position = PositionContext(
+        strategy_tag="adaptive-median-v6",
+        open_direction=Side.BUY,
+        opened_at_ms=now_ms - 3_600_000,
+        actual_base_qty=D("2"),
+        actual_notional_usd=D("200"),
+        actual_open_pnl_usd=D("0"),
+        epoch=epoch,
+    )
+    close_pnl = D("-0.012")
+    market = replace(
+        frame(
+            at_ms=now_ms,
+            reference_buy=D("0"),
+            reference_sell=D("0"),
+        ),
+        var_bid=D("100"),
+        var_ask=D("100"),
+        lighter_actual_buy_vwap=D("100") - close_pnl / D("2"),
+    )
+
+    decision = strategy_engine().evaluate_close(
+        frame=market,
+        position=position,
+        now_ms=now_ms,
+    )
+
+    assert decision.action is Action.CLOSE
+    assert decision.close_candidate is not None
+    assert decision.close_candidate.required_floor_usd == D("-0.024")
 
 
 def test_close_uses_actual_base_qty_and_current_close_notional(model):
@@ -1331,7 +1354,7 @@ def test_close_uses_actual_base_qty_and_current_close_notional(model):
     engine = strategy_engine()
 
     buy_open = PositionContext(
-        "adaptive-median-v1",
+        "adaptive-median-v6",
         Side.BUY,
         now_ms - 1_000_000,
         D("2"),
@@ -1351,7 +1374,7 @@ def test_close_uses_actual_base_qty_and_current_close_notional(model):
     assert buy_close.close_candidate.required_floor_usd == D("0")
 
     sell_open = PositionContext(
-        "adaptive-median-v1",
+        "adaptive-median-v6",
         Side.SELL,
         now_ms - 1_900_000,
         D("2"),
@@ -1372,11 +1395,11 @@ def test_close_uses_actual_base_qty_and_current_close_notional(model):
     assert sell_close.close_candidate.required_floor_usd == D("-0.02")
 
 
-def test_close_requires_weighted_baseline_regression_and_pnl_floor(model):
+def test_close_uses_pnl_floor_and_keeps_regression_as_diagnostic(model):
     epoch = candidate(model, now_ms=10_000)
     now_ms = 20_000_000
     position = PositionContext(
-        "adaptive-median-v1",
+        "adaptive-median-v6",
         Side.BUY,
         now_ms - 31 * 60 * 1_000,
         D("2"),
@@ -1390,26 +1413,16 @@ def test_close_requires_weighted_baseline_regression_and_pnl_floor(model):
         lighter_actual_buy_vwap=D("100.2"),
         actual_notional_usd=D("200"),
     )
-    waiting = strategy_engine().evaluate_close(
+    decision = strategy_engine().evaluate_close(
         frame=market,
         position=position,
         now_ms=now_ms,
     )
-    assert waiting.action is Action.NO_ACTION
-    assert waiting.reason == "close_baseline_regression_not_met"
-    assert waiting.close_candidate is not None
-    assert waiting.close_candidate.round_lower_bound_usd > D("0")
-    assert not waiting.close_candidate.regression_passed
-    assert waiting.close_candidate.regression_target_rate == epoch.thresholds.sell.baseline
-
-    regressed = strategy_engine().evaluate_close(
-        frame=replace(market, lighter_actual_buy_vwap=D("100.05")),
-        position=position,
-        now_ms=now_ms,
-    )
-    assert regressed.action is Action.CLOSE
-    assert regressed.close_candidate is not None
-    assert regressed.close_candidate.regression_passed
+    assert decision.action is Action.CLOSE
+    assert decision.close_candidate is not None
+    assert decision.close_candidate.round_lower_bound_usd > D("0")
+    assert not decision.close_candidate.regression_passed
+    assert decision.close_candidate.regression_target_rate == epoch.thresholds.sell.baseline
 
 
 def test_manual_position_is_not_strategy_closed(model):
@@ -1424,7 +1437,7 @@ def test_manual_position_is_not_strategy_closed(model):
 def test_missing_frozen_close_context_fails_closed():
     market = frame(at_ms=20_000, reference_buy=D("1"), reference_sell=D("1"))
     position = PositionContext(
-        "adaptive-median-v1", Side.BUY, 10_000, D("2"), D("200"), D("1"), None
+        "adaptive-median-v6", Side.BUY, 10_000, D("2"), D("200"), D("1"), None
     )
     decision = strategy_engine().evaluate_close(frame=market, position=position, now_ms=20_000)
     assert decision.action is Action.PAUSE

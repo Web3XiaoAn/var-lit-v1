@@ -21,7 +21,7 @@ Var-Lit V1 是 Variational 与 Lighter 之间的 BTC 双边执行程序。这是
 - 本地 Chrome 扩展、三通道健康探针、执行延迟分析和资源采样工具。
 - Ubuntu 24.04、普通 Chrome + Xvfb + 轻量 Openbox、systemd 的服务器部署模板。
 - 仅监听回环地址、通过 SSH 隧道访问的 200ms 实时网页运维面板。
-- 可选 SQLite 研究库；服务器默认关闭，只保留约一小时的滚动运行数据。
+- 独立低优先级 SQLite 研究采集服务；Runtime 自身仍只保留约一小时滚动数据，数据库写入不进入交易热路径。
 
 内部策略状态标识为 `adaptive-median-v6`。它是版本化公式和冻结持仓上下文的内部标识，
 不代表公开产品已经发布过六版，也不能在不迁移状态的情况下改名。公开产品、运行时、
@@ -41,6 +41,13 @@ Var-Lit V1 是 Variational 与 Lighter 之间的 BTC 双边执行程序。这是
 
 真实 `.env`、Chrome profile、钱包数据、虚拟环境、日志、SQLite 数据库和运行状态都不会
 进入 Git。不要强制添加这些文件。
+
+## 文档入口
+
+- [Ubuntu 24.04 从购机到实盘部署](deploy/README.md)：购机、防火墙、SSH、Chrome、钱包、systemd、验收、升级和故障恢复。
+- [Windows 网页面板客户端](docs/WINDOWS_DASHBOARD.md)：Windows 10/11 通过 SSH 隧道安全查看服务器面板。
+- [整体架构、核心逻辑与模型由来](docs/ARCHITECTURE_AND_MODELS.md)：数据流、交易状态机、风控边界和两个现行模型的校准口径。
+- [当前策略公式](docs/ADAPTIVE_MEDIAN_V6.md)：`adaptive-median-v6` 与 `execution-survival-v2` 的精确定义。
 
 ## 运行要求
 
@@ -173,17 +180,20 @@ venv/bin/python tools/demo_operations_dashboard.py
 ## 数据边界
 
 运行时内存只取最新一小时。行情 JSONL 至少保留 61 分钟并定期压缩，物理跨度最多约
-70 分钟。服务器模板设置 `RESEARCH_DATABASE_ENABLED=false`，不会维护长期研究数据库；
-恢复状态、成交证据和轮转日志仍会保留。
+70 分钟。服务器模板设置 `RESEARCH_DATABASE_ENABLED=false`，表示 **Runtime 进程本身**
+不写长期数据库；独立的 `var-lit-v1-research.service` 以低优先级从轮转证据同步 SQLite，
+避免数据库写入阻塞 Quote、Commit 或 Lighter 下单。恢复状态、成交证据和轮转日志仍会
+保留。
 
-需要本地研究时，可启用外部 SQLite 数据库。默认磁盘上限 900 MiB，后台同步不进入
-Firm Quote、Commit 或 Lighter 下单热路径。详见
+默认数据库磁盘上限 900 MiB。也可只在本机启用同一套外部 SQLite 研究流程；后台同步
+不进入 Firm Quote、Commit 或 Lighter 下单热路径。详见
 [`research_data/README.md`](research_data/README.md)。
 
 ## Ubuntu 部署
 
-腾讯云截图中的东京 Ubuntu 24.04、2 vCPU、8 GiB RAM、80 GiB SSD、200 Mbps 配置适合
-本项目。完整安装、钱包初始化、SSH 隧道与 systemd 顺序见
+东京 Ubuntu 24.04、2 vCPU、8 GiB RAM、80 GiB SSD 是当前单 BTC 实例的参考起点，
+不是容量保证。完整的购机、防火墙、SSH 密钥、安装、钱包初始化、面板隧道、systemd、
+升级与恢复顺序见
 [`deploy/README.md`](deploy/README.md)。服务器中 Chrome 仍是普通浏览器，只是窗口显示在
 Xvfb 虚拟屏幕；首次安装 OKX、登录和签名必须由账户持有人完成。
 
@@ -197,15 +207,12 @@ bash -n deploy/launch_chrome.sh deploy/run_runtime.sh
 
 GitHub Actions 在 Ubuntu 24.04 上同时覆盖 Python 3.11、3.12 和扩展测试。
 
-## 性能与资源分析
+## 研究与资源分析
 
 ```bash
-# 只读汇总当前与轮转执行追踪
-venv/bin/python tools/analyze_runtime_performance.py --json
-
-# 对两个环境的报告做 P95 回退检查
-venv/bin/python tools/compare_performance_reports.py baseline.json candidate.json \
-  --baseline-build var-lit-v1 --candidate-build var-lit-v1
+# 只读汇总数据质量、执行延迟、候选存活、盘口因子和完整轮次
+venv/bin/python tools/analyze_execution_survival.py \
+  /var/lib/var-lit-v1/research/strategy_research.sqlite3 --since-hours 24
 
 # 采集 Python 与专用 Chrome 的 CPU/RSS
 venv/bin/python tools/profile_process_resources.py \
@@ -213,7 +220,9 @@ venv/bin/python tools/profile_process_resources.py \
   --duration 300 --interval 1 --summary-only
 ```
 
-性能分析工具只读取外部运行目录，不连接交易所，也不进入实盘进程。部署验收重点比较
-Variational Quote、Firm、Commit 以及 Commit 到 Lighter 发送/成交的 P50/P95/P99。
+统一分析器以只读方式打开研究库，不连接交易所，也不进入实盘进程。报告严格区分币种、
+方向、observe/live、样本类型和策略版本，并汇总 Variational Quote/Commit、Commit 到
+Lighter Ack/Fill、执行存活率、reserve、深度、book/trade flow、microprice、保护回退及
+整轮收益。
 
 当前策略公式和执行保护详见 [`docs/ADAPTIVE_MEDIAN_V6.md`](docs/ADAPTIVE_MEDIAN_V6.md)。

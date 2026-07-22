@@ -124,6 +124,65 @@ class OperationsDashboardServerTests(unittest.TestCase):
                 host="0.0.0.0",
             )
 
+    def test_concurrent_duplicate_commit_executes_once(self) -> None:
+        async def run_case() -> None:
+            executions = 0
+
+            async def snapshot() -> dict:
+                return {"sequence": 1}
+
+            async def prepare(_action: str, _payload: dict) -> dict:
+                return {"allowed": True, "guard": "same"}
+
+            async def execute(_action: str, _payload: dict, _preview: dict) -> dict:
+                nonlocal executions
+                executions += 1
+                await asyncio.sleep(0.02)
+                return {"ok": True, "message": "once"}
+
+            port = unused_loopback_port()
+            server = OperationsDashboardServer(
+                snapshot_factory=snapshot,
+                action_preparer=prepare,
+                action_executor=execute,
+                asset_dir=PROJECT_DIR / "dashboard",
+                port=port,
+            )
+            await server.start()
+            try:
+                base = f"http://127.0.0.1:{port}"
+                headers = {
+                    "Origin": base,
+                    "X-Var-Lit-CSRF": server._csrf_token,
+                }
+                async with ClientSession() as client:
+                    prepared = await client.post(
+                        base + "/api/actions/prepare",
+                        json={"action": "pause_open", "payload": {}},
+                        headers=headers,
+                    )
+                    confirmation_id = (await prepared.json())["confirmationId"]
+
+                    responses = await asyncio.gather(
+                        *(
+                            client.post(
+                                base + "/api/actions/commit",
+                                json={"confirmationId": confirmation_id},
+                                headers=headers,
+                            )
+                            for _ in range(2)
+                        )
+                    )
+                    payloads = [await response.json() for response in responses]
+
+                self.assertEqual([response.status for response in responses], [200, 200])
+                self.assertEqual(payloads[0], payloads[1])
+                self.assertEqual(executions, 1)
+            finally:
+                await server.stop()
+
+        asyncio.run(run_case())
+
     def test_dashboard_has_no_external_assets_or_popup_controls(self) -> None:
         source = (PROJECT_DIR / "dashboard" / "index.html").read_text(
             encoding="utf-8"
@@ -159,10 +218,13 @@ class OperationsDashboardServerTests(unittest.TestCase):
         self.assertIn("当前持仓收益", source)
         self.assertIn("开仓收益", source)
         self.assertIn("开仓基差", source)
-        self.assertIn("此时平仓磨损", source)
+        self.assertIn("当前整轮净估值", source)
+        self.assertIn("今日累计平均", source)
+        self.assertIn("todayTradingVolumeUsd", source)
+        self.assertNotIn("双边权威仓位", source)
         self.assertIn("round.recovery && hasWear ? '保护回退'", source)
         self.assertIn("平仓预留", source)
-        self.assertIn("positionPnl.closeEstimate", source)
+        self.assertIn("metrics.currentRoundEstimate", source)
         self.assertIn("positionPnl.closeReserve", source)
         self.assertIn("positionPnl.openBasis", source)
         self.assertIn("检查并保存", source)
@@ -173,7 +235,11 @@ class OperationsDashboardServerTests(unittest.TestCase):
         )
         self.assertNotIn("displaySnapshot", source)
         self.assertNotIn("demo-scenario", source)
-        self.assertIn("definition.key !== 'pause_open'", source)
+        self.assertIn("const emergencyPause = definition.key === 'pause_open'", source)
+        self.assertIn("lastSnapshot?.strategy?.openPaused === false", source)
+        self.assertIn("if (controlsLocked && !emergencyPause)", source)
+        self.assertIn("const activeDefinition = {", source)
+        self.assertIn("name: wrapper.querySelector('.action-name').textContent", source)
         self.assertIn("if (controlsLocked) closeAllActions()", source)
         self.assertIn("revision !== prepareRevision", source)
 
