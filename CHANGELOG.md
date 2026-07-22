@@ -8,6 +8,8 @@
 - 新增从腾讯云购机、防火墙、SSH、Chrome、钱包到 systemd、observe/live、升级和崩溃恢复
   的 Ubuntu 24.04 全流程教程。
 - 新增 Windows 10/11 网页面板 SSH 客户端、系统架构、核心状态机和模型校准说明。
+- 修正进程刚启动时首次账户过期刷新被冷却时间误挡的边界，并移除测试中的冗余 pytest
+  依赖。
 
 ## Close hold floor v1
 

@@ -10,8 +10,6 @@ from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
-import pytest
-
 from adaptive_strategy import (
     Action,
     DirectionalRates,
@@ -39,11 +37,6 @@ ROOT = Path(__file__).resolve().parents[1]
 MODEL_PATH = ROOT / "adaptive_strategy" / "models" / "adaptive-median-v6.json"
 D = Decimal
 MODEL = load_model_config(MODEL_PATH)
-
-
-@pytest.fixture
-def model():
-    return MODEL
 
 
 def strategy_engine(**overrides) -> StrategyEngine:

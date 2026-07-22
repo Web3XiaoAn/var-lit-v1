@@ -13600,7 +13600,8 @@ class VariationalToLighterRuntime:
             < VARIATIONAL_PORTFOLIO_REFRESH_GRACE_SECONDS
         )
         refresh_in_cooldown = bool(
-            time.monotonic() - self._last_stale_portfolio_refresh_at
+            self._last_stale_portfolio_refresh_at > 0
+            and time.monotonic() - self._last_stale_portfolio_refresh_at
             < VARIATIONAL_PAGE_REFRESH_RETRY_SECONDS
         )
         if stale_in_grace or refresh_in_cooldown:
